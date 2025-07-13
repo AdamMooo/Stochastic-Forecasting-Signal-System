@@ -60,9 +60,10 @@ class AdvancedStockProjection:
                 stock = yf.Ticker(ticker)
                 hist = stock.history(start=start_date, end=end_date)
                 info = stock.info
-                
+
                 # Ensure timezone-naive index for all data
-                if hist.index.tz is not None:
+                tz_info = getattr(hist.index, 'tz', None)
+                if tz_info is not None:
                     hist = hist.tz_localize(None)
                 
                 self.stock_data[ticker] = {
@@ -112,9 +113,11 @@ class AdvancedStockProjection:
                 
                 # Ensure timezone-naive index
                 try:
-                    if hasattr(data.index, 'tz') and data.index.tz is not None:
+                    # Use getattr to avoid type checker warnings
+                    tz_info = getattr(data.index, 'tz', None)
+                    if tz_info is not None:
                         data = data.tz_localize(None)
-                except AttributeError:
+                except (AttributeError, TypeError):
                     # If timezone handling fails, continue with the data as is
                     pass
                 
@@ -183,9 +186,11 @@ class AdvancedStockProjection:
         
         # Ensure returns index is timezone-naive
         try:
-            if hasattr(returns.index, 'tz') and returns.index.tz is not None:
+            # Use getattr to avoid type checker warnings
+            tz_info = getattr(returns.index, 'tz', None)
+            if tz_info is not None:
                 returns = returns.tz_localize(None)
-        except AttributeError:
+        except (AttributeError, TypeError):
             # If timezone handling fails, continue with the data as is
             pass
         
@@ -198,9 +203,11 @@ class AdvancedStockProjection:
                 
                 # Ensure macro_returns index is timezone-naive
                 try:
-                    if hasattr(macro_returns.index, 'tz') and macro_returns.index.tz is not None:
+                    # Use getattr to avoid type checker warnings
+                    tz_info = getattr(macro_returns.index, 'tz', None)
+                    if tz_info is not None:
                         macro_returns = macro_returns.tz_localize(None)
-                except AttributeError:
+                except (AttributeError, TypeError):
                     # If timezone handling fails, continue with the data as is
                     pass
                 
@@ -558,6 +565,12 @@ class AdvancedStockProjection:
             
             # Analyze projections
             stats = self.analyze_projections(ticker, simulation_results)
+            # Momentum Interpretation (Console)
+            momentum_summary = self.interpret_momentum_indicators(simulation_results['momentum'])
+
+            print(f"\nMomentum Interpretation for {ticker}:")
+            for key, interpretation in momentum_summary.items():
+                print(f"  {key}: {interpretation}")
             
             # Create visualizations
             plot_filename = self.create_visualizations(ticker, simulation_results, stats)
@@ -666,7 +679,14 @@ class AdvancedStockProjection:
                              simulation['momentum']['bb_position'], simulation['momentum']['ma_momentum'],
                              simulation['momentum']['price_vs_ma50'], simulation['momentum']['price_vs_ma200']]
                 }
-                
+                # Add interpretation rows
+                momentum_summary = self.interpret_momentum_indicators(simulation['momentum'])
+                interpretation_df = pd.DataFrame(
+                    list(momentum_summary.items()),
+                    columns=pd.Index(['Indicator', 'Interpretation'])
+                )
+                interpretation_df.to_excel(writer, sheet_name=f'{ticker}_Momentum', index=False, startrow=10)
+
                 # Write to Excel
                 pd.DataFrame(price_data).to_excel(writer, sheet_name=f'{ticker}_Price', index=False)
                 pd.DataFrame(return_data).to_excel(writer, sheet_name=f'{ticker}_Returns', index=False)
@@ -704,6 +724,93 @@ class AdvancedStockProjection:
                 os.remove(plot_file)
                 
         return output_file
+        
+    def interpret_momentum_indicators(self, momentum):
+        """Interpret momentum indicators and provide trading signals"""
+        rsi = momentum['rsi']
+        macd = momentum['macd']
+        bb_pos = momentum['bb_position']
+        ma_mom = momentum['ma_momentum']
+        ma50 = momentum['price_vs_ma50']
+        ma200 = momentum['price_vs_ma200']
+
+        def interpret_rsi(val):
+            if val >= 80:
+                return f"RSI is {val:.1f} → Very Overbought: High reversal risk."
+            elif val >= 70:
+                return f"RSI is {val:.1f} → Overbought: Caution, possible pullback."
+            elif val >= 55:
+                return f"RSI is {val:.1f} → Mildly Bullish: Moderate strength."
+            elif val >= 45:
+                return f"RSI is {val:.1f} → Neutral: No strong trend."
+            elif val >= 30:
+                return f"RSI is {val:.1f} → Oversold: Possible rebound."
+            else:
+                return f"RSI is {val:.1f} → Very Oversold: High rebound potential."
+
+        def interpret_macd(val):
+            if val >= 2:
+                return f"MACD {val:.2f} → Strong Bullish: Confirmed uptrend."
+            elif val >= 1:
+                return f"MACD {val:.2f} → Bullish: Positive momentum."
+            elif val >= 0.2:
+                return f"MACD {val:.2f} → Mild Bullish: Weak but improving."
+            elif val >= -0.2:
+                return f"MACD {val:.2f} → Flat: No trend."
+            elif val >= -1:
+                return f"MACD {val:.2f} → Mild Bearish: Weak downward move."
+            else:
+                return f"MACD {val:.2f} → Strong Bearish: Momentum loss or trend reversal."
+
+        def interpret_bb(val):
+            if val >= 0.9:
+                return f"BB Pos {val:.2f} → Extremely Overbought: Above upper band."
+            elif val >= 0.75:
+                return f"BB Pos {val:.2f} → Upper Band Zone: Price rising fast."
+            elif val >= 0.5:
+                return f"BB Pos {val:.2f} → Above Midline: Uptrend."
+            elif val >= 0.25:
+                return f"BB Pos {val:.2f} → Below Midline: Slight weakness."
+            elif val >= 0.1:
+                return f"BB Pos {val:.2f} → Lower Band Zone: Potential oversold."
+            else:
+                return f"BB Pos {val:.2f} → Extremely Oversold: Below lower band."
+
+        def interpret_ma_momentum(val):
+            if val >= 0.1:
+                return f"MA Momentum {val*100:.2f}% → Strong Bullish: Long-term uptrend."
+            elif val >= 0.03:
+                return f"MA Momentum {val*100:.2f}% → Bullish Crossover: Positive trend."
+            elif val >= 0:
+                return f"MA Momentum {val*100:.2f}% → Flat/Neutral."
+            elif val >= -0.03:
+                return f"MA Momentum {val*100:.2f}% → Weak Bearish."
+            else:
+                return f"MA Momentum {val*100:.2f}% → Strong Bearish: Long-term downtrend."
+
+        def interpret_price_vs_ma(val, label):
+            pct = val * 100
+            if pct >= 10:
+                return f"{pct:.2f}% above {label} → Very Bullish"
+            elif pct >= 3:
+                return f"{pct:.2f}% above {label} → Bullish"
+            elif pct >= 0:
+                return f"{pct:.2f}% above {label} → Slightly Bullish"
+            elif pct >= -3:
+                return f"{pct:.2f}% below {label} → Slightly Bearish"
+            elif pct >= -10:
+                return f"{pct:.2f}% below {label} → Bearish"
+            else:
+                return f"{pct:.2f}% below {label} → Very Bearish"
+
+        return {
+            'RSI': interpret_rsi(rsi),
+            'MACD': interpret_macd(macd),
+            'Bollinger Band Position': interpret_bb(bb_pos),
+            'MA Momentum': interpret_ma_momentum(ma_mom),
+            'Price vs MA50': interpret_price_vs_ma(ma50, 'MA50'),
+            'Price vs MA200': interpret_price_vs_ma(ma200, 'MA200')
+        }
 
 # Usage Example
 if __name__ == "__main__":
