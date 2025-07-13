@@ -1,5 +1,5 @@
-Key Features
-1. Enhanced GBM with Multiple Factors
+# Key Features:
+1. GBM with Multiple Factors
 
 Momentum Integration: RSI, MACD, Bollinger Bands, Moving Average convergence
 Macroeconomic Factors: VIX (volatility), 10-Year Treasury, S&P 500 correlation, Dollar Index
@@ -42,7 +42,8 @@ Custom Investment Amounts: Flexible investment per stock
 Detailed Projections: 2-year forward-looking simulations
 50,000 Monte Carlo Paths: High-precision probability estimates
 
-📊 What the System Outputs
+# What the System Outputs:
+
 Excel Report with Multiple Sheets:
 
 Summary Dashboard - All stocks compared side-by-side
@@ -62,7 +63,8 @@ Profit/Loss Scenarios
 Current Momentum Indicators bar charts
 Risk Metrics visualization
 
-🎯 How It Works
+
+# How It Works:
 
 Data Collection: Fetches 5 years of historical data plus macroeconomic indicators
 Momentum Calculation: Computes all technical indicators for current market state
