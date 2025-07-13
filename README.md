@@ -1,4 +1,4 @@
-# 📈 Stochastic Forecasting & Signal System
+# Stochastic Forecasting & Signal System
 
 **Stochastic Forecasting & Signal System** is a Python-based quantitative simulation engine designed to model future stock price movements using advanced stochastic techniques, technical momentum indicators, macroeconomic sensitivity, and jump diffusion modeling. 
 
