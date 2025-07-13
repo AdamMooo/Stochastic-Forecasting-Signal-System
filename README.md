@@ -106,7 +106,7 @@ Suppose you want to simulate a 2-year outlook for a portfolio of 8 stocks includ
 
 ---
 
-## ✅ Status
+## Status
 
 > **In Active Development** – continuously improved with additional indicators, scenario interpretation, and machine learning modules coming soon.
 
