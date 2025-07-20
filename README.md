@@ -1,47 +1,81 @@
 # Stochastic Forecasting & Signal System
 
-A Python-based quantitative simulation engine for advanced stock price modeling using stochastic processes, technical indicators, and macroeconomic factor integration.
+A Python-based quantitative simulation engine for advanced stock price modeling using enhanced Geometric Brownian Motion (GBM) with jump diffusion processes, technical momentum indicators, and macroeconomic factor integration.
 
 ## Overview
 
-This system implements an enhanced Geometric Brownian Motion (GBM) model with jump diffusion processes to forecast stock price movements over 2-year horizons. It integrates real-time momentum indicators, macroeconomic correlations, and comprehensive risk analysis to generate professional investment reports.
+This system implements an enhanced GBM model with jump diffusion to forecast stock price movements over 2-year horizons. It dynamically adjusts drift and volatility parameters based on real-time momentum indicators and macroeconomic correlations, generating comprehensive investment reports with professional visualizations.
 
 ## Key Technical Features
 
-### Advanced Stochastic Modeling
-- **Enhanced GBM with Jump Diffusion**: 50,000 Monte Carlo simulations per stock
-- **Dynamic Parameter Adjustment**: Drift and volatility modified by market momentum and macro factors
-- **Jump Detection**: Automatic identification and modeling of 3-sigma market events
+### Enhanced GBM with Jump Diffusion
+- **50,000 Monte Carlo Simulations**: Per stock over 2-year projection period
+- **Dynamic Parameter Adjustment**: Drift (μ) and volatility (σ) modified by momentum and macro factors
+- **Jump Detection**: Automatic identification of 3-standard deviation market events
+- **Jump Parameter Estimation**: Models jump frequency (λ), average size (μ_jump), and volatility (σ_jump)
 
-### Multi-Factor Integration
-- **Technical Indicators**: RSI, MACD, Bollinger Bands, Moving Average convergence
-- **Macroeconomic Factors**: VIX, 10-Year Treasury, S&P 500, Currency indices, Gold
-- **Correlation Analysis**: Real-time sensitivity to market conditions
+### Technical Momentum Integration
+- **RSI (Relative Strength Index)**: Overbought/oversold detection with momentum adjustment
+- **MACD (Moving Average Convergence Divergence)**: Trend momentum and signal crossovers
+- **Bollinger Bands Position**: Price deviation from volatility envelope
+- **Moving Average Momentum**: 50-day vs 200-day MA convergence signals
+- **Price vs Moving Averages**: Current price comparison against MA50 and MA200
+
+### Macroeconomic Factor Integration
+- **VIX (Volatility Index)**: Market fear and uncertainty correlation
+- **10-Year Treasury (TNX)**: Interest rate sensitivity analysis
+- **S&P 500 (SPY)**: Systematic market beta correlation
+- **Gold (GLD)**: Macro risk-off proxy correlation
+- **Real-time Correlation Analysis**: Daily return correlations to macro benchmarks
 
 ### Comprehensive Risk Analytics
-- **Value at Risk (VaR)**: 5% worst-case scenarios
-- **Conditional VaR (CVaR)**: Expected loss under tail risk
-- **Maximum Drawdown**: Peak-to-trough loss analysis
+- **Value at Risk (VaR)**: 5% worst-case downside scenarios
+- **Conditional VaR (CVaR)**: Expected loss under tail risk conditions
+- **Maximum Drawdown**: Largest simulated loss from peak to trough
 - **Upside Potential**: 95th percentile gain estimates
-- **Profit Probability**: Likelihood of positive returns
+- **Profit Probability**: Likelihood of positive returns after 2 years
+- **Investment Outcomes**: Dollar-based P&L simulations with share calculations
 
 ## Output Generation
 
 ### Excel Reports
-- Cross-stock comparison dashboards
-- Statistical price projections and return analysis
-- Investment outcome simulations with dollar-based P&L
-- Current momentum indicator values and model parameters
+- **Summary Dashboard**: Cross-stock comparison with key metrics
+- **Price Projections**: Statistical breakdown of simulated price paths
+- **Return Analysis**: Total and annualized returns with percentile distributions
+- **Investment Outcomes**: P&L scenarios based on $10,000 investment per stock
+- **Momentum Indicators**: Current technical signal values and interpretations
+- **Model Parameters**: Base and adjusted drift/volatility with momentum/macro adjustments
 
 ### Professional Visualizations
-- Simulated price paths with confidence bands
-- Price and return distribution histograms
-- Risk metrics summary charts
-- Momentum indicator analysis
+- **Simulated Price Paths**: 300 sample paths with confidence bands (10th-90th percentiles)
+- **Final Price Distribution**: Histogram with current, mean, and median price markers
+- **Total Return Distribution**: Percentage return analysis with break-even line
+- **Profit/Loss Distribution**: Dollar-based P&L scenarios
+- **Momentum Indicator Bar Chart**: Current RSI, MACD, BB position, MA momentum values
+- **Risk Metrics Summary**: VaR, CVaR, max loss, mean P&L, upside potential
+
+## Technical Implementation
+
+### Data Processing
+- **5-Year Historical Data**: Via Yahoo Finance API for stocks and macro indicators
+- **Real-time Price Updates**: Current market prices for position valuation
+- **Currency Auto-Detection**: CAD/USD handling for Canadian stocks (.TO tickers)
+- **Timezone Handling**: Robust timezone-naive data processing
+
+### Simulation Engine
+- **Enhanced GBM Formula**: S(t) = S(t-1) × exp((μ - 0.5σ²)dt + σ√dt × Z + Jumps)
+- **Momentum Adjustments**: RSI, BB position, and MA momentum factors
+- **Macro Adjustments**: VIX fear factor, interest rate sensitivity, market correlation
+- **Jump Diffusion**: Poisson process for rare market events
+
+### Risk Calculation
+- **Monte Carlo Statistics**: Mean, median, percentiles across 50,000 paths
+- **Investment Analysis**: Share calculations and dollar-based outcomes
+- **Probability Metrics**: Profit/loss likelihood calculations
 
 ## Technical Stack
 
-- **Python**: NumPy, Pandas, SciPy for numerical computations
+- **Python**: NumPy, Pandas, SciPy for numerical computations and statistics
 - **Data Sources**: Yahoo Finance API for real-time market data
 - **Visualization**: Matplotlib, Seaborn for professional charts
 - **Reporting**: Excel integration with xlsxwriter and openpyxl
@@ -53,6 +87,7 @@ This system implements an enhanced Geometric Brownian Motion (GBM) model with ju
 - Investment research and due diligence
 - Quantitative trading strategy development
 - Academic research in financial modeling
+- Multi-currency portfolio analysis (CAD/USD)
 
 ## Project Status
 
