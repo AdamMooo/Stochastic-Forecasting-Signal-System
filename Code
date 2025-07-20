@@ -1,10 +1,10 @@
+# type: ignore
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
-from scipy.optimize import minimize
 import warnings
 warnings.filterwarnings('ignore')
 from datetime import datetime, timedelta
@@ -12,47 +12,131 @@ import xlsxwriter
 from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
-from openpyxl.drawing.image import Image as XLImage
 import os
+from mpl_toolkits.mplot3d import Axes3D
+from matplotlib import cm
+from matplotlib.colors import Normalize
+from scipy.interpolate import griddata
 
-class AdvancedStockProjection:
-    def __init__(self, tickers, investment_per_stock=10000, projection_years=2):
+class StrategyStockAnalyzer:
+    def __init__(self, tickers, existing_positions=None, planning_stocks=None, new_investment_ideas=True, projection_months=3, historical_years=5):
         """
-        Initialize the advanced stock projection system
+        Initialize the strategic stock analyzer
         
         Parameters:
         -----------
         tickers : list
             List of stock tickers to analyze
-        investment_per_stock : float
-            Amount to invest per stock for analysis
-        projection_years : int
-            Number of years to project forward
+        existing_positions : dict or None
+            Existing positions as share counts: {'TICKER': shares, ...}
+            - None: No existing positions
+        planning_stocks : list or None
+            List of tickers for planning stocks
+        new_investment_ideas : bool
+            Whether to generate new investment ideas for stocks not in existing positions
+        projection_months : int
+            Number of months to project forward (3-4 months)
+        historical_years : int
+            Number of years of historical data to analyze (should be > projection_months/12)
         """
         self.tickers = tickers
-        self.investment_per_stock = investment_per_stock
-        self.projection_years = projection_years
-        self.projection_days = int(252 * projection_years)
+        self.planning_stocks = planning_stocks or []
+        self.projection_months = projection_months
+        self.projection_days = int(21 * projection_months)  # ~21 trading days per month
+        self.historical_years = historical_years
+        self.new_investment_ideas = new_investment_ideas
+        
+        # Store original positions (share counts)
+        if existing_positions is None:
+            self.original_positions = {}
+            self.existing_positions = {}
+        elif isinstance(existing_positions, dict):
+            self.original_positions = existing_positions.copy()
+            self.existing_positions = existing_positions.copy()
+        else:
+            self.original_positions = {ticker: existing_positions for ticker in tickers}
+            self.existing_positions = {ticker: existing_positions for ticker in tickers}
         
         # Data storage
         self.stock_data = {}
         self.macro_data = {}
         self.results = {}
+        self.options_data = {}
         
         # Simulation parameters
-        self.sim_count = 50000
+        self.sim_count = 10000  
         self.dt = 1/252
         
-        print(f"Initializing Advanced Stock Projection System for {len(tickers)} stocks")
-        print(f"Projection Period: {projection_years} years ({self.projection_days} trading days)")
-        print(f"Investment per stock: ${investment_per_stock:,}")
+        # Currency conversion setup
+        self.usd_to_cad_rate = self.get_usd_to_cad_rate()
         
-    def fetch_data(self, years_back=5):
-        """Fetch stock data and macroeconomic indicators"""
+        print(f"Strategic Stock Investment Analyzer")
+        print(f"Analyzing {len(tickers)} stocks for {projection_months}-month outlook")
+        print(f"Historical data: {historical_years} years")
+        print(f"Projection: {self.projection_days} trading days")
+        print(f"CURRENCY: Auto-detecting currency for each stock")
+        
+        print(f"POSITION AUTO-UPDATE: Enabled (calculating current values from share counts)")
+        
+        # Print original positions
+        if self.original_positions:
+            print(f"EXISTING SHARE POSITIONS:")
+            for ticker, shares in self.original_positions.items():
+                print(f"  {ticker}: {shares} shares")
+        else:
+            print(f"EXISTING POSITIONS: None")
+        
+        if self.new_investment_ideas:
+            print(f"NEW INVESTMENT IDEAS: Enabled")
+        else:
+            print(f"NEW INVESTMENT IDEAS: Disabled")
+    
+    def get_usd_to_cad_rate(self):
+        """Get current USD to CAD exchange rate"""
+        try:
+            # Fetch USD/CAD exchange rate
+            usdcad = yf.Ticker("USDCAD=X")
+            rate = usdcad.info.get('regularMarketPrice', 1.35)  # Default fallback
+            return rate
+        except:
+            return 1.35  # Default fallback rate
+    
+    def convert_to_cad(self, usd_amount):
+        """Convert USD amount to CAD"""
+        return usd_amount * self.usd_to_cad_rate
+    
+    def detect_currency(self, ticker):
+        """Detect if a ticker is traded in CAD or USD"""
+        # Canadian stocks typically end with .TO or are on TSX
+        cad_indicators = ['.TO', '.V', 'TSX']
+        return any(indicator in ticker.upper() for indicator in cad_indicators)
+    
+    def format_currency(self, amount, ticker):
+        """Format amount in the appropriate currency for the ticker"""
+        if self.detect_currency(ticker):
+            return f"C${amount:,.2f}"
+        else:
+            return f"${amount:,.2f}"
+    
+    def convert_currency(self, amount, ticker):
+        """Convert amount to CAD, but only if the ticker is in USD"""
+        if self.detect_currency(ticker):
+            # Already in CAD, no conversion needed
+            return amount
+        else:
+            # Convert USD to CAD
+            return amount * self.usd_to_cad_rate
+        
+    def fetch_data(self, years_back=None):
+        """Fetch stock data and key macro indicators"""
+        if years_back is None:
+            years_back = self.historical_years
+            
         start_date = (datetime.now() - timedelta(days=365*years_back)).strftime('%Y-%m-%d')
         end_date = datetime.now().strftime('%Y-%m-%d')
         
-        print(f"\nFetching data from {start_date} to {end_date}")
+        print(f"\nFetching market data ({start_date} to {end_date})")
+        print(f"Historical period: {years_back} years vs {self.projection_months} months projection")
         
         # Fetch individual stock data
         for ticker in self.tickers:
@@ -61,10 +145,14 @@ class AdvancedStockProjection:
                 hist = stock.history(start=start_date, end=end_date)
                 info = stock.info
 
-                # Ensure timezone-naive index for all data
-                tz_info = getattr(hist.index, 'tz', None)
-                if tz_info is not None:
-                    hist = hist.tz_localize(None)
+                # Ensure timezone-naive index
+                try:
+                    if hasattr(hist.index, 'tz'):
+                        tz_attr = getattr(hist.index, 'tz', None)
+                        if tz_attr is not None:
+                            hist = hist.tz_localize(None)
+                except:
+                    pass  # Skip timezone handling if not applicable
                 
                 self.stock_data[ticker] = {
                     'prices': hist['Close'],
@@ -73,759 +161,2834 @@ class AdvancedStockProjection:
                     'low': hist['Low'],
                     'returns': hist['Close'].pct_change().dropna(),
                     'info': info,
-                    'current_price': hist['Close'].iloc[-1]
+                    'current_price': hist['Close'].iloc[-1],
+                    'sector': info.get('sector', 'Unknown'),
+                    'industry': info.get('industry', 'Unknown'),
+                    'market_cap': info.get('marketCap', 0),
+                    'pe_ratio': info.get('trailingPE', 0),
+                    'forward_pe': info.get('forwardPE', 0),
+                    'dividend_yield': info.get('dividendYield', 0) or 0
                 }
-                print(f"✓ {ticker}: {len(hist)} days of data")
+                current_price = hist['Close'].iloc[-1]
+                print(f"  {ticker}: {len(hist)} days | {self.format_currency(current_price, ticker)}")
             except Exception as e:
-                print(f"✗ Error fetching {ticker}: {e}")
+                print(f"  {ticker}: {str(e)}")
+        
+        # Auto-update position values
+        if self.original_positions:
+            self.update_position_values()
                 
-        # Fetch macroeconomic data
+        # Fetch key macro indicators
         macro_tickers = {
-            '^VIX': 'VIX',      # Volatility Index
-            '^TNX': 'TNX',      # 10-Year Treasury
-            '^GSPC': 'SPY',     # S&P 500
-            'EURUSD=X': 'EUR',  # Euro/USD instead of DXY
-            'GLD': 'GOLD'       # Gold ETF as alternative
+            '^VIX': 'VIX',
+            '^TNX': 'TNX', 
+            '^GSPC': 'SPY',
+            'GLD': 'GOLD'
         }
         
         for ticker, name in macro_tickers.items():
             try:
-                # Try different methods for fetching data
-                data = None
-                if ticker == '^VIX':
-                    # VIX sometimes needs special handling
-                    data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-                    if data is not None and not data.empty and 'Close' in data.columns:
-                        data = data['Close']
-                    else:
-                        # Try alternative VIX symbol
-                        alt_data = yf.download('VIX', start=start_date, end=end_date, progress=False)
-                        if alt_data is not None and not alt_data.empty and 'Close' in alt_data.columns:
-                            data = alt_data['Close']
-                else:
-                    data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-                    if data is not None and isinstance(data, pd.DataFrame) and 'Close' in data.columns:
-                        data = data['Close']
-                
-                # Ensure we have valid data
-                if data is None or data.empty or len(data) < 50:
-                    raise ValueError(f"Insufficient data for {ticker}")
-                
-                # Ensure timezone-naive index
-                try:
-                    # Use getattr to avoid type checker warnings
-                    tz_info = getattr(data.index, 'tz', None)
-                    if tz_info is not None:
-                        data = data.tz_localize(None)
-                except (AttributeError, TypeError):
-                    # If timezone handling fails, continue with the data as is
-                    pass
-                
-                # Calculate returns and store
-                returns = data.pct_change().dropna()
-                if len(returns) > 30:  # Minimum viable data
-                    self.macro_data[name] = returns
-                    print(f"✓ {name}: {len(returns)} days of macro data")
-                else:
-                    raise ValueError(f"Insufficient return data for {ticker}")
+                data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+                if data is not None and not data.empty and 'Close' in data.columns:
+                    close_data = data['Close']
+                    try:
+                        if hasattr(close_data.index, 'tz'):
+                            tz_attr = getattr(close_data.index, 'tz', None)
+                            if tz_attr is not None:
+                                close_data = close_data.tz_localize(None)
+                    except:
+                        pass  # Skip timezone handling if not applicable
                     
-            except Exception as e:
-                print(f"✗ Could not fetch {name} ({ticker}): {e}")
-                # Create empty series with same index as first stock for alignment
-                if self.stock_data:
-                    first_stock = list(self.stock_data.keys())[0]
-                    sample_index = self.stock_data[first_stock]['returns'].index[:10]  # Small sample
-                    self.macro_data[name] = pd.Series(0.0, index=sample_index)
+                    returns = close_data.pct_change().dropna()
+                    if len(returns) > 30:
+                        self.macro_data[name] = returns
+                        print(f"  {name}: {len(returns)} days")
+                    else:
+                        self.macro_data[name] = pd.Series(0.0, index=pd.date_range(start=start_date, end=end_date, freq='D')[:10])
                 else:
-                    self.macro_data[name] = pd.Series(dtype=float)
+                    self.macro_data[name] = pd.Series(0.0, index=pd.date_range(start=start_date, end=end_date, freq='D')[:10])
+            except Exception as e:
+                print(f"  {name}: Using default data")
+                self.macro_data[name] = pd.Series(0.0, index=pd.date_range(start=start_date, end=end_date, freq='D')[:10])
+    
+    def update_position_values(self):
+        """Update position values based on current market prices"""
+        print(f"\nUpdating position values to current market prices...")
+        
+        updated_positions = {}
+        total_current_value = 0
+        
+        for ticker, shares in self.original_positions.items():
+            if ticker in self.stock_data:
+                current_price = self.stock_data[ticker]['current_price']
+                current_value = shares * current_price
+                updated_positions[ticker] = current_value
+                total_current_value += current_value
                 
-    def calculate_momentum_indicators(self, ticker):
-        """Calculate various momentum indicators"""
+                print(f"  {ticker}: {shares} shares × {self.format_currency(current_price, ticker)} = {self.format_currency(current_value, ticker)}")
+            else:
+                print(f"  {ticker}: No current price data available")
+        
+        self.existing_positions = updated_positions
+        
+        if total_current_value > 0:
+            print(f"  Total current portfolio value: {self.format_currency(total_current_value, 'PORTFOLIO')}")
+                
+    def fetch_options_data(self, ticker):
+        """Fetch detailed options data for a given ticker with live market data verification"""
+        try:
+            stock = yf.Ticker(ticker)
+            current_price = self.stock_data[ticker]['current_price']
+            
+            print(f"    Fetching live options data for {ticker}...")
+            
+            # Get options expiration dates
+            expirations = stock.options
+            
+            if not expirations:
+                print(f"    {ticker}: No options available")
+                return None
+                
+            print(f"    {ticker}: Found {len(expirations)} expiration dates")
+            
+            # Focus on multiple near-term expirations (1-4 months)
+            near_term_expirations = []
+            for exp in expirations:
+                exp_date = datetime.strptime(exp, '%Y-%m-%d')
+                days_to_expiry = (exp_date - datetime.now()).days
+                if 30 <= days_to_expiry <= 120:  # 1-4 months
+                    near_term_expirations.append(exp)
+            
+            if not near_term_expirations:
+                print(f"    {ticker}: No suitable near-term options")
+                return None
+                
+            # Get options data for multiple expirations
+            all_options_data = {}
+            
+            for exp in near_term_expirations[:3]:  # Analyze up to 3 expirations
+                try:
+                    options = stock.option_chain(exp)
+                    days_to_expiry = (datetime.strptime(exp, '%Y-%m-%d') - datetime.now()).days
+                    
+                    calls = options.calls
+                    puts = options.puts
+                    
+                    # Verify we have live data
+                    if calls.empty and puts.empty:
+                        print(f"    {ticker} {exp}: No live options data")
+                        continue
+                    
+                    # Filter options with volume and open interest
+                    calls_filtered = calls[
+                        (calls['volume'] > 0) | (calls['openInterest'] > 0)
+                    ]
+                    puts_filtered = puts[
+                        (puts['volume'] > 0) | (puts['openInterest'] > 0)
+                    ]
+                    
+                    # Add ATM and near ATM options (within 15% of current price)
+                    atm_range = current_price * 0.15
+                    calls_atm = calls[
+                        (calls['strike'] >= current_price - atm_range) & 
+                        (calls['strike'] <= current_price + atm_range)
+                    ]
+                    puts_atm = puts[
+                        (puts['strike'] >= current_price - atm_range) & 
+                        (puts['strike'] <= current_price + atm_range)
+                    ]
+                    
+                    # Combine filtered options
+                    calls_combined = pd.concat([calls_filtered, calls_atm]).drop_duplicates()
+                    puts_combined = pd.concat([puts_filtered, puts_atm]).drop_duplicates()
+                    
+                    # Calculate additional metrics
+                    if not calls_combined.empty:
+                        calls_combined['moneyness'] = (calls_combined['strike'] - current_price) / current_price
+                        calls_combined['time_value'] = calls_combined['lastPrice'] - np.maximum(0, current_price - calls_combined['strike'])
+                        
+                    if not puts_combined.empty:
+                        puts_combined['moneyness'] = (puts_combined['strike'] - current_price) / current_price
+                        puts_combined['time_value'] = puts_combined['lastPrice'] - np.maximum(0, puts_combined['strike'] - current_price)
+                    
+                    all_options_data[exp] = {
+                        'expiration': exp,
+                        'days_to_expiry': days_to_expiry,
+                        'calls': calls_combined,
+                        'puts': puts_combined,
+                        'total_call_volume': calls_combined['volume'].sum() if not calls_combined.empty else 0,
+                        'total_put_volume': puts_combined['volume'].sum() if not puts_combined.empty else 0,
+                        'total_call_oi': calls_combined['openInterest'].sum() if not calls_combined.empty else 0,
+                        'total_put_oi': puts_combined['openInterest'].sum() if not puts_combined.empty else 0,
+                        'put_call_ratio': (puts_combined['volume'].sum() / calls_combined['volume'].sum()) if not calls_combined.empty and calls_combined['volume'].sum() > 0 else 0
+                    }
+                    
+                    print(f"    {ticker} {exp}: {len(calls_combined)} calls, {len(puts_combined)} puts (Volume: {all_options_data[exp]['total_call_volume'] + all_options_data[exp]['total_put_volume']})")
+                    
+                except Exception as e:
+                    print(f"    {ticker} {exp}: Error fetching options - {str(e)}")
+                    continue
+            
+            if not all_options_data:
+                print(f"    {ticker}: No valid options data found")
+                return None
+            
+            # Use the expiration with the most liquid options
+            best_exp = max(all_options_data.keys(), 
+                          key=lambda x: all_options_data[x]['total_call_volume'] + all_options_data[x]['total_put_volume'])
+            
+            options_data = all_options_data[best_exp]
+            options_data['current_price'] = current_price
+            options_data['all_expirations'] = all_options_data
+            
+            print(f"    {ticker}: Using {best_exp} expiration with {options_data['total_call_volume'] + options_data['total_put_volume']} total volume")
+            
+            return options_data
+            
+        except Exception as e:
+            print(f"    {ticker}: Options data unavailable - {str(e)}")
+            return None
+        
+    def calculate_technical_signals(self, ticker):
+        """Calculate key technical indicators and generate signals"""
         prices = self.stock_data[ticker]['prices']
         returns = self.stock_data[ticker]['returns']
+        volume = self.stock_data[ticker]['volume']
         
-        # RSI
+        # RSI calculation
         delta = returns
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs))
+        current_rsi = rsi.iloc[-1] if not rsi.empty else 50
         
         # MACD
         exp1 = prices.ewm(span=12).mean()
         exp2 = prices.ewm(span=26).mean()
         macd = exp1 - exp2
         signal = macd.ewm(span=9).mean()
-        histogram = macd - signal
+        macd_current = macd.iloc[-1] if not macd.empty else 0
+        signal_current = signal.iloc[-1] if not signal.empty else 0
+        
+        # Moving averages
+        ma_10 = prices.rolling(window=10).mean()
+        ma_20 = prices.rolling(window=20).mean()
+        ma_50 = prices.rolling(window=50).mean()
+        
+        current_price = prices.iloc[-1]
         
         # Bollinger Bands
-        sma = prices.rolling(window=20).mean()
-        std = prices.rolling(window=20).std()
-        upper_bb = sma + (std * 2)
-        lower_bb = sma - (std * 2)
-        bb_position = (prices - lower_bb) / (upper_bb - lower_bb)
+        bb_mid = ma_20.iloc[-1] if not ma_20.empty else current_price
+        bb_std = prices.rolling(window=20).std().iloc[-1] if len(prices) > 20 else 0
+        bb_upper = bb_mid + (2 * bb_std)
+        bb_lower = bb_mid - (2 * bb_std)
         
-        # Moving Average Convergence
-        ma_50 = prices.rolling(window=50).mean()
-        ma_200 = prices.rolling(window=200).mean()
-        ma_momentum = (ma_50 - ma_200) / ma_200
+        # Volume analysis
+        avg_volume = volume.rolling(window=20).mean().iloc[-1] if not volume.empty else 0
+        current_volume = volume.iloc[-1] if not volume.empty else 0
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
         
-        return {
-            'rsi': rsi.iloc[-1] if not rsi.empty else 50,
-            'macd': macd.iloc[-1] if not macd.empty else 0,
-            'bb_position': bb_position.iloc[-1] if not bb_position.empty else 0.5,
-            'ma_momentum': ma_momentum.iloc[-1] if not ma_momentum.empty else 0,
-            'price_vs_ma50': (prices.iloc[-1] - ma_50.iloc[-1]) / ma_50.iloc[-1] if not ma_50.empty else 0,
-            'price_vs_ma200': (prices.iloc[-1] - ma_200.iloc[-1]) / ma_200.iloc[-1] if not ma_200.empty else 0
+        # Price momentum
+        price_change_1d = (current_price - prices.iloc[-2]) / prices.iloc[-2] if len(prices) > 1 else 0
+        price_change_5d = (current_price - prices.iloc[-6]) / prices.iloc[-6] if len(prices) > 5 else 0
+        price_change_20d = (current_price - prices.iloc[-21]) / prices.iloc[-21] if len(prices) > 20 else 0
+        
+        # Technical signals
+        signals = {
+            'rsi': current_rsi,
+            'rsi_signal': 'OVERSOLD' if current_rsi < 30 else 'OVERBOUGHT' if current_rsi > 70 else 'NEUTRAL',
+            'macd': macd_current,
+            'macd_signal': 'BUY' if macd_current > signal_current else 'SELL',
+            'ma_10': ma_10.iloc[-1] if not ma_10.empty else current_price,
+            'ma_20': ma_20.iloc[-1] if not ma_20.empty else current_price,
+            'ma_50': ma_50.iloc[-1] if not ma_50.empty else current_price,
+            'ma_trend': 'BULLISH' if current_price > ma_20.iloc[-1] else 'BEARISH',
+            'bb_position': (current_price - bb_lower) / (bb_upper - bb_lower) if bb_upper > bb_lower else 0.5,
+            'volume_signal': 'HIGH' if volume_ratio > 1.5 else 'LOW' if volume_ratio < 0.5 else 'NORMAL',
+            'momentum_1d': price_change_1d,
+            'momentum_5d': price_change_5d,
+            'momentum_20d': price_change_20d,
+            'volatility': returns.std() * np.sqrt(252) if not returns.empty else 0
         }
         
-    def calculate_macro_correlations(self, ticker):
-        """Calculate correlations with macroeconomic factors"""
-        returns = self.stock_data[ticker]['returns']
-        correlations = {}
+        return signals
         
-        # Ensure returns index is timezone-naive
-        try:
-            # Use getattr to avoid type checker warnings
-            tz_info = getattr(returns.index, 'tz', None)
-            if tz_info is not None:
-                returns = returns.tz_localize(None)
-        except (AttributeError, TypeError):
-            # If timezone handling fails, continue with the data as is
-            pass
-        
-        for macro_name, macro_returns in self.macro_data.items():
-            try:
-                # Skip if macro data is empty or too short
-                if macro_returns.empty or len(macro_returns) < 30:
-                    correlations[macro_name] = 0.0
-                    continue
-                
-                # Ensure macro_returns index is timezone-naive
-                try:
-                    # Use getattr to avoid type checker warnings
-                    tz_info = getattr(macro_returns.index, 'tz', None)
-                    if tz_info is not None:
-                        macro_returns = macro_returns.tz_localize(None)
-                except (AttributeError, TypeError):
-                    # If timezone handling fails, continue with the data as is
-                    pass
-                
-                # Align dates - find common dates
-                common_dates = returns.index.intersection(macro_returns.index)
-                
-                if len(common_dates) > 30:  # Minimum observations
-                    stock_aligned = returns.loc[common_dates]
-                    macro_aligned = macro_returns.loc[common_dates]
-                    
-                    # Ensure both are 1-dimensional pandas Series
-                    if isinstance(stock_aligned, pd.Series) and isinstance(macro_aligned, pd.Series):
-                        # Remove any NaN values
-                        combined = pd.DataFrame({'stock': stock_aligned, 'macro': macro_aligned}).dropna()
-                        
-                        if len(combined) > 30:
-                            # Calculate correlation using numpy for better type safety
-                            stock_values = combined['stock'].to_numpy()
-                            macro_values = combined['macro'].to_numpy()
-                            
-                            # Check for valid data
-                            if len(stock_values) > 0 and len(macro_values) > 0:
-                                # Use numpy correlation
-                                corr_matrix = np.corrcoef(stock_values, macro_values)
-                                if corr_matrix.shape == (2, 2):
-                                    corr = corr_matrix[0, 1]
-                                    correlations[macro_name] = corr if not np.isnan(corr) else 0.0
-                                else:
-                                    correlations[macro_name] = 0.0
-                            else:
-                                correlations[macro_name] = 0.0
-                        else:
-                            correlations[macro_name] = 0.0
-                    else:
-                        correlations[macro_name] = 0.0
-                else:
-                    correlations[macro_name] = 0.0
-                    
-            except Exception as e:
-                print(f"Warning: Could not calculate correlation for {ticker} vs {macro_name}: {e}")
-                correlations[macro_name] = 0.0
-        
-        # If no correlations calculated, provide defaults
-        if not correlations:
-            correlations = {'VIX': 0.0, 'TNX': 0.0, 'SPY': 0.0, 'EUR': 0.0, 'GOLD': 0.0}
-        
-        return correlations
-        
-    def estimate_jump_parameters(self, returns):
-        """Estimate jump diffusion parameters using method of moments"""
-        # Basic jump detection - returns beyond 3 standard deviations
-        threshold = 3 * returns.std()
-        jumps = returns[np.abs(returns) > threshold]
-        
-        if len(jumps) < 5:
-            return {'lambda': 0, 'mu_jump': 0, 'sigma_jump': 0}
-            
-        # Jump intensity (jumps per year)
-        lambda_jump = len(jumps) / (len(returns) / 252)
-        
-        # Jump size parameters
-        mu_jump = jumps.mean()
-        sigma_jump = jumps.std()
-        
-        return {
-            'lambda': lambda_jump,
-            'mu_jump': mu_jump,
-            'sigma_jump': sigma_jump
-        }
-        
-    def enhanced_gbm_simulation(self, ticker):
-        """Run enhanced GBM simulation with momentum and macro factors"""
-        
-        # Basic parameters
+    def calculate_statistical_analysis(self, ticker):
+        """Calculate statistical analysis using GBM model and implied volatility"""
         returns = self.stock_data[ticker]['returns']
         current_price = self.stock_data[ticker]['current_price']
         
-        # Calculate base drift and volatility
-        base_mu = returns.mean() * 252
-        base_sigma = returns.std() * np.sqrt(252)
+        # Calculate historical volatility (realized volatility)
+        historical_vol = returns.std() * np.sqrt(252)
         
-        # Get momentum indicators
-        momentum = self.calculate_momentum_indicators(ticker)
+        # Calculate implied volatility from options if available
+        implied_vol = None
+        if ticker in self.options_data and self.options_data[ticker] is not None:
+            implied_vol = self.calculate_average_implied_volatility(ticker)
         
-        # Get macro correlations
-        macro_corr = self.calculate_macro_correlations(ticker)
-        correlations = macro_corr  # Use for later reference
+        # Use implied volatility if available, otherwise use historical
+        effective_vol = implied_vol if implied_vol is not None else historical_vol
         
-        # Get jump parameters
-        jump_params = self.estimate_jump_parameters(returns)
+        # Calculate GBM parameters
+        mu = returns.mean() * 252  # Annualized drift
+        sigma = effective_vol  # Use effective volatility
         
-        # Momentum adjustment factor
-        rsi_factor = (momentum['rsi'] - 50) / 50 * 0.1  # RSI momentum
-        bb_factor = (momentum['bb_position'] - 0.5) * 0.05  # Bollinger bands
-        ma_factor = momentum['ma_momentum'] * 0.15  # Moving average momentum
+        # Calculate Sharpe ratio (risk-adjusted return)
+        risk_free_rate = 0.05  # Assume 5% risk-free rate
+        excess_return = mu - risk_free_rate
+        sharpe_ratio = excess_return / sigma if sigma > 0 else 0
         
-        momentum_adjustment = rsi_factor + bb_factor + ma_factor
+        # Calculate Value at Risk (VaR) at 95% confidence
+        var_95 = stats.norm.ppf(0.05, mu, sigma)
         
-        # Macro adjustment (assuming current macro conditions persist)
-        macro_adjustment = 0
-        if correlations and len(correlations) > 0:
-            if 'VIX' in correlations and correlations['VIX'] != 0:
-                macro_adjustment += correlations['VIX'] * 0.05  # VIX fear factor
-            if 'TNX' in correlations and correlations['TNX'] != 0:
-                macro_adjustment += correlations['TNX'] * 0.03  # Interest rate sensitivity
-            if 'SPY' in correlations and correlations['SPY'] != 0:
-                macro_adjustment += correlations['SPY'] * 0.08  # Market correlation
-            if 'EUR' in correlations and correlations['EUR'] != 0:
-                macro_adjustment += correlations['EUR'] * 0.02  # Currency sensitivity
+        # Calculate Expected Shortfall (Conditional VaR)
+        es_95 = mu - sigma * stats.norm.pdf(stats.norm.ppf(0.05)) / 0.05
+        
+        # Calculate maximum drawdown probability
+        max_drawdown_prob = self.calculate_max_drawdown_probability(mu, sigma)
+        
+        # Calculate statistical scores (0-100 scale)
+        scores = {}
+        
+        # Volatility score (lower volatility is better for most investors)
+        if sigma > 0:
+            scores['volatility_score'] = max(0, 100 - (sigma * 100))  # Lower vol = higher score
+        else:
+            scores['volatility_score'] = 50
+        
+        # Sharpe ratio score
+        scores['sharpe_score'] = min(100, max(0, (sharpe_ratio + 1) * 25))  # Scale to 0-100
+        
+        # VaR score (lower VaR is better)
+        scores['var_score'] = max(0, 100 + (var_95 * 100))  # Lower VaR = higher score
+        
+        # Maximum drawdown score
+        scores['drawdown_score'] = max(0, 100 - (max_drawdown_prob * 100))
+        
+        # Overall statistical score
+        statistical_score = np.mean(list(scores.values()))
+        
+        return {
+            'historical_volatility': historical_vol,
+            'implied_volatility': implied_vol,
+            'effective_volatility': effective_vol,
+            'drift': mu,
+            'sharpe_ratio': sharpe_ratio,
+            'var_95': var_95,
+            'expected_shortfall': es_95,
+            'max_drawdown_probability': max_drawdown_prob,
+            'statistical_score': statistical_score,
+            'scores': scores
+        }
+    
+    def calculate_average_implied_volatility(self, ticker):
+        """Calculate average implied volatility from options data"""
+        if ticker not in self.options_data or self.options_data[ticker] is None:
+            return None
             
-        # Adjusted parameters
-        adjusted_mu = base_mu + momentum_adjustment + macro_adjustment
-        adjusted_sigma = base_sigma * (1 + abs(momentum_adjustment) * 0.5)
+        options = self.options_data[ticker]
+        calls = options['calls']
+        puts = options['puts']
+        current_price = options['current_price']
+        days_to_expiry = options['days_to_expiry']
         
-        # Monte Carlo simulation with jump diffusion
+        ivs = []
+        
+        # Calculate IV for calls
+        if not calls.empty:
+            for _, call in calls.iterrows():
+                try:
+                    iv = self.calculate_implied_volatility(
+                        call['lastPrice'], current_price, call['strike'], 
+                        days_to_expiry/365, 0.05, 'call'
+                    )
+                    if iv > 0 and iv < 2:  # Reasonable IV range
+                        ivs.append(iv)
+                except:
+                    continue
+        
+        # Calculate IV for puts
+        if not puts.empty:
+            for _, put in puts.iterrows():
+                try:
+                    iv = self.calculate_implied_volatility(
+                        put['lastPrice'], current_price, put['strike'], 
+                        days_to_expiry/365, 0.05, 'put'
+                    )
+                    if iv > 0 and iv < 2:  # Reasonable IV range
+                        ivs.append(iv)
+                except:
+                    continue
+        
+        if ivs:
+            return np.mean(ivs)
+        else:
+            return None
+    
+    def calculate_max_drawdown_probability(self, mu, sigma):
+        """Calculate probability of experiencing a significant drawdown"""
+        # Calculate probability of 20% drawdown over 1 year
+        target_drawdown = -0.20
+        time_horizon = 1.0  # 1 year
+        
+        # Using GBM properties
+        z_score = (target_drawdown - mu * time_horizon) / (sigma * np.sqrt(time_horizon))
+        probability = stats.norm.cdf(z_score)
+        
+        return probability
+        
+    def generate_investment_signal(self, ticker, technical_signals, statistical_data):
+        """Generate comprehensive investment signal using GBM and statistical analysis"""
+        
+        # Technical score calculation (including P/E ratio)
+        tech_score = 0
+        tech_factors = []
+        
+        # RSI contribution
+        if technical_signals['rsi_signal'] == 'OVERSOLD':
+            tech_score += 20
+            tech_factors.append("RSI oversold (+)")
+        elif technical_signals['rsi_signal'] == 'OVERBOUGHT':
+            tech_score -= 15
+            tech_factors.append("RSI overbought (-)")
+        else:
+            tech_score += 5
+            
+        # MACD contribution
+        if technical_signals['macd_signal'] == 'BUY':
+            tech_score += 20
+            tech_factors.append("MACD bullish (+)")
+        else:
+            tech_score -= 10
+            tech_factors.append("MACD bearish (-)")
+            
+        # Moving average trend
+        if technical_signals['ma_trend'] == 'BULLISH':
+            tech_score += 25
+            tech_factors.append("Above MA20 (+)")
+        else:
+            tech_score -= 20
+            tech_factors.append("Below MA20 (-)")
+            
+        # Volume confirmation
+        if technical_signals['volume_signal'] == 'HIGH':
+            tech_score += 10
+            tech_factors.append("High volume (+)")
+        elif technical_signals['volume_signal'] == 'LOW':
+            tech_score -= 5
+            
+        # Momentum
+        if technical_signals['momentum_5d'] > 0.02:
+            tech_score += 10
+            tech_factors.append("Strong 5D momentum (+)")
+        elif technical_signals['momentum_5d'] < -0.02:
+            tech_score -= 10
+            tech_factors.append("Weak 5D momentum (-)")
+        
+        # P/E Ratio analysis (moved from fundamental to technical)
+        info = self.stock_data[ticker]['info']
+        pe_ratio = info.get('trailingPE', 0) or 0
+        if pe_ratio > 0:
+            if pe_ratio < 15:
+                tech_score += 15
+                tech_factors.append("Low P/E (+)")
+            elif pe_ratio > 30:
+                tech_score -= 10
+                tech_factors.append("High P/E (-)")
+            else:
+                tech_score += 5
+                tech_factors.append("Reasonable P/E")
+            
+        # Normalize technical score to 0-100
+        tech_score = max(0, min(100, tech_score + 50))
+        
+        # Statistical score from GBM analysis
+        stat_score = statistical_data['statistical_score']
+        
+        # Combined score (25% technical, 75% statistical for data-driven approach)
+        combined_score = (tech_score * 0.25) +  (stat_score * 0.75)
+        
+        # Generate signal
+        if combined_score >= 80:
+            signal = "STRONG BUY"
+            signal_color = "🟢"
+        elif combined_score >= 60:
+            signal = "BUY"
+            signal_color = "🟡"
+        elif combined_score >= 40:
+            signal = "HOLD"
+            signal_color = "🟠"
+        elif combined_score >= 30:
+            signal = "WEAK SELL"
+            signal_color = "🔴"
+        else:
+            signal = "SELL"
+            signal_color = "🔴"
+            
+        # Risk assessment using statistical measures
+        effective_vol = statistical_data['effective_volatility']
+        var_95 = statistical_data['var_95']
+        max_drawdown_prob = statistical_data['max_drawdown_probability']
+        
+        # Enhanced risk assessment
+        risk_score = 0
+        if effective_vol > 0.4:
+            risk_score += 3
+        elif effective_vol > 0.25:
+            risk_score += 2
+        else:
+            risk_score += 1
+            
+        if var_95 < -0.3:
+            risk_score += 2
+        elif var_95 < -0.2:
+            risk_score += 1
+            
+        if max_drawdown_prob > 0.3:
+            risk_score += 2
+        elif max_drawdown_prob > 0.2:
+            risk_score += 1
+        
+        if risk_score >= 5:
+            risk_level = "HIGH"
+        elif risk_score >= 3:
+            risk_level = "MEDIUM"
+        else:
+            risk_level = "LOW"
+            
+        # Position sizing recommendation using statistical measures
+        base_position = 1.0  # 100% of intended investment
+        
+        # Adjust based on volatility and VaR
+        if effective_vol > 0.4 or var_95 < -0.3:
+            position_size = base_position * 0.5  # Reduce position for high risk
+        elif effective_vol > 0.25 or var_95 < -0.2:
+            position_size = base_position * 0.75
+        else:
+            position_size = base_position
+            
+        # Adjust based on signal strength
+        if combined_score >= 70:
+            position_size *= 1.0  # Full position for strong signals
+        elif combined_score >= 60:
+            position_size *= 0.8
+        elif combined_score >= 40:
+            position_size *= 0.5
+        else:
+            position_size *= 0.2
+            
+        position_size = min(1.0, position_size)  # Cap at 100%
+        
+        return {
+            'signal': signal,
+            'signal_color': signal_color,
+            'combined_score': combined_score,
+            'tech_score': tech_score,
+            'tech_factors': tech_factors,
+            'stat_score': stat_score,
+            'risk_level': risk_level,
+            'position_size': position_size,
+            'effective_volatility': effective_vol,
+            'var_95': var_95,
+            'max_drawdown_prob': max_drawdown_prob
+        }
+        
+    def run_projection_simulation(self, ticker):
+        """Run enhanced Monte Carlo simulation using GBM with implied volatility"""
+        returns = self.stock_data[ticker]['returns']
+        current_price = self.stock_data[ticker]['current_price']
+        
+        # Get statistical analysis for enhanced parameters
+        statistical_data = self.calculate_statistical_analysis(ticker)
+        
+        # Use effective volatility (implied if available, historical otherwise)
+        mu = statistical_data['drift']  # GBM drift
+        sigma = statistical_data['effective_volatility']  # Enhanced volatility
+        
+        # Adjust for short-term momentum
+        technical_signals = self.calculate_technical_signals(ticker)
+        
+        # Enhanced momentum adjustment using statistical measures
+        momentum_adj = 0
+        if technical_signals['momentum_5d'] > 0.02:
+            momentum_adj = 0.03  # Reduced boost for more conservative approach
+        elif technical_signals['momentum_5d'] < -0.02:
+            momentum_adj = -0.03  # Reduced penalty
+            
+        # Volatility regime adjustment
+        vol_regime_adj = 0
+        if sigma > 0.4:  # High volatility regime
+            vol_regime_adj = -0.02  # Reduce drift in high vol
+        elif sigma < 0.15:  # Low volatility regime
+            vol_regime_adj = 0.01  # Slight boost in low vol
+            
+        adjusted_mu = mu + momentum_adj + vol_regime_adj
+        
+        # Monte Carlo simulation with enhanced GBM
         np.random.seed(42)
+        dt = 1/252
+        
+        # Generate price paths
         paths = np.zeros((self.projection_days + 1, self.sim_count))
         paths[0] = current_price
         
         for t in range(1, self.projection_days + 1):
-            # Standard GBM component
             z = np.random.standard_normal(self.sim_count)
-            gbm_component = (adjusted_mu - 0.5 * adjusted_sigma**2) * self.dt + adjusted_sigma * np.sqrt(self.dt) * z
+            paths[t] = paths[t-1] * np.exp((adjusted_mu - 0.5 * sigma**2) * dt + sigma * np.sqrt(dt) * z)
             
-            # Jump component
-            if jump_params['lambda'] > 0:
-                jump_prob = jump_params['lambda'] * self.dt
-                jump_occur = np.random.random(self.sim_count) < jump_prob
-                jump_sizes = np.random.normal(jump_params['mu_jump'], jump_params['sigma_jump'], self.sim_count)
-                jump_component = jump_occur * jump_sizes
-            else:
-                jump_component = 0
-                
-            # Combine components
-            total_return = gbm_component + jump_component
-            paths[t] = paths[t-1] * np.exp(total_return)
-            
-        return {
-            'paths': paths,
-            'base_mu': base_mu,
-            'adjusted_mu': adjusted_mu,
-            'base_sigma': base_sigma,
-            'adjusted_sigma': adjusted_sigma,
-            'momentum': momentum,
-            'macro_corr': macro_corr,
-            'jump_params': jump_params,
-            'momentum_adjustment': momentum_adjustment,
-            'macro_adjustment': macro_adjustment
-        }
-        
-    def analyze_projections(self, ticker, simulation_results):
-        """Analyze projection results and calculate statistics"""
-        paths = simulation_results['paths']
-        current_price = self.stock_data[ticker]['current_price']
-        
-        # Final prices
+        # Calculate enhanced projection statistics
         final_prices = paths[-1]
         
-        # Calculate returns
-        total_returns = (final_prices / current_price - 1) * 100
-        annualized_returns = ((final_prices / current_price) ** (1/self.projection_years) - 1) * 100
+        # Investment analysis
+        if ticker in self.existing_positions:
+            shares = self.existing_positions[ticker] / current_price
+            final_values = final_prices * shares
+            profit_loss = final_values - self.existing_positions[ticker]
+        else:
+            # For new investment ideas, use a standard amount
+            standard_amount = 5000
+            shares = standard_amount / current_price
+            final_values = final_prices * shares
+            profit_loss = final_values - standard_amount
         
-        # Calculate investment outcomes
-        shares = self.investment_per_stock / current_price
-        final_values = final_prices * shares
-        profit_loss = final_values - self.investment_per_stock
+        # Enhanced risk metrics
+        var_95 = np.percentile(profit_loss, 5)
+        var_99 = np.percentile(profit_loss, 1)
+        expected_shortfall = np.mean(profit_loss[profit_loss <= var_95])
         
-        # Statistics
-        stats = {
-            # Price statistics
+        # Calculate Sharpe ratio for the projection
+        projection_returns = (final_prices - current_price) / current_price
+        projection_sharpe = (np.mean(projection_returns) - 0.05/12) / np.std(projection_returns) if np.std(projection_returns) > 0 else 0
+        
+        projection_stats = {
             'current_price': current_price,
-            'mean_final_price': np.mean(final_prices),
-            'median_final_price': np.median(final_prices),
-            'price_5th_percentile': np.percentile(final_prices, 5),
-            'price_95th_percentile': np.percentile(final_prices, 95),
-            'price_std': np.std(final_prices),
-            
-            # Return statistics
-            'mean_total_return': np.mean(total_returns),
-            'median_total_return': np.median(total_returns),
-            'return_5th_percentile': np.percentile(total_returns, 5),
-            'return_95th_percentile': np.percentile(total_returns, 95),
-            'return_std': np.std(total_returns),
-            
-            # Annualized returns
-            'mean_annualized_return': np.mean(annualized_returns),
-            'median_annualized_return': np.median(annualized_returns),
-            'annualized_5th_percentile': np.percentile(annualized_returns, 5),
-            'annualized_95th_percentile': np.percentile(annualized_returns, 95),
-            
-            # Investment outcomes
-            'investment_amount': self.investment_per_stock,
-            'shares_purchased': shares,
-            'mean_final_value': np.mean(final_values),
-            'median_final_value': np.median(final_values),
-            'value_5th_percentile': np.percentile(final_values, 5),
-            'value_95th_percentile': np.percentile(final_values, 95),
-            'mean_profit_loss': np.mean(profit_loss),
-            'median_profit_loss': np.median(profit_loss),
+            'mean_target_price': np.mean(final_prices),
+            'median_target_price': np.median(final_prices),
+            'upside_target': np.percentile(final_prices, 75),
+            'downside_target': np.percentile(final_prices, 25),
             'probability_profit': np.mean(profit_loss > 0) * 100,
-            'probability_loss': np.mean(profit_loss < 0) * 100,
-            
-            # Risk metrics
-            'var_5': np.percentile(profit_loss, 5),
-            'cvar_5': np.mean(profit_loss[profit_loss <= np.percentile(profit_loss, 5)]),
-            'max_drawdown': np.min(profit_loss),
+            'expected_return': np.mean(profit_loss),
+            'risk_5_percent': var_95,
+            'risk_1_percent': var_99,
+            'expected_shortfall': expected_shortfall,
             'upside_potential': np.percentile(profit_loss, 95),
-            
-            # Model parameters
-            'base_mu': simulation_results['base_mu'],
-            'adjusted_mu': simulation_results['adjusted_mu'],
-            'base_sigma': simulation_results['base_sigma'],
-            'adjusted_sigma': simulation_results['adjusted_sigma'],
-            'momentum_adjustment': simulation_results['momentum_adjustment'],
-            'macro_adjustment': simulation_results['macro_adjustment']
+            'projection_sharpe': projection_sharpe,
+            'paths': paths,
+            'mu': mu,
+            'adjusted_mu': adjusted_mu,
+            'sigma': sigma,
+            'implied_vol_used': statistical_data['implied_volatility'] is not None
         }
         
-        return stats
+        return projection_stats
         
-    def create_visualizations(self, ticker, simulation_results, stats):
-        """Create comprehensive visualizations"""
-        paths = simulation_results['paths']
-        current_price = self.stock_data[ticker]['current_price']
+    def create_stock_visualization(self, ticker):
+        """Create comprehensive visualization for each stock"""
         
-        # Create subplot figure
-        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
-        fig.suptitle(f'{ticker} - Advanced Stock Price Projections', fontsize=16, fontweight='bold')
+        # Get all analysis data
+        technical_signals = self.calculate_technical_signals(ticker)
+        statistical_data = self.calculate_statistical_analysis(ticker)
+        investment_signal = self.generate_investment_signal(ticker, technical_signals, statistical_data)
+        projection_stats = self.run_projection_simulation(ticker)
         
-        # 1. Price paths
-        ax1 = axes[0, 0]
-        sample_paths = paths[:, :300] 
-        time_axis = np.arange(len(sample_paths))
+        # Create figure with focused subplots for essential analysis
+        fig = plt.figure(figsize=(16, 12))
+        gs = fig.add_gridspec(3, 2, hspace=0.3, wspace=0.3)
         
-        for i in range(sample_paths.shape[1]):
-            ax1.plot(time_axis, sample_paths[:, i], alpha=0.1, color='blue')
-            
-        # Add percentile bands
-        percentiles = np.percentile(paths, [10, 25, 50, 75, 90], axis=1)
-        ax1.plot(time_axis, percentiles[2], 'r-', linewidth=2, label='Median')
-        ax1.fill_between(time_axis, percentiles[0], percentiles[4], alpha=0.2, color='red', label='10th-90th percentile')
-        ax1.fill_between(time_axis, percentiles[1], percentiles[3], alpha=0.3, color='red', label='25th-75th percentile')
+        # 1. Price chart with technical indicators (top left)
+        ax1 = fig.add_subplot(gs[0, 0])
+        prices = self.stock_data[ticker]['prices'][-120:]  # Last 120 days
         
-        ax1.axhline(y=current_price, color='black', linestyle='--', label='Current Price')
-        ax1.set_title('Price Projection Paths')
-        ax1.set_xlabel('Trading Days')
+        ax1.plot(prices.index, prices.values, 'b-', linewidth=2, label='Price')
+        ax1.plot(prices.index, prices.rolling(20).mean(), 'r--', alpha=0.7, label='MA20')
+        ax1.plot(prices.index, prices.rolling(50).mean(), 'g--', alpha=0.7, label='MA50')
+        
+        # Add Bollinger Bands
+        bb_std = prices.rolling(20).std()
+        bb_upper = prices.rolling(20).mean() + (2 * bb_std)
+        bb_lower = prices.rolling(20).mean() - (2 * bb_std)
+        ax1.fill_between(prices.index, bb_upper, bb_lower, alpha=0.1, color='gray', label='Bollinger Bands')
+        
+        ax1.set_title(f'Price Chart - {investment_signal["signal"]} {investment_signal["signal_color"]}')
         ax1.set_ylabel('Price ($)')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
-        # 2. Final price distribution
-        ax2 = axes[0, 1]
-        final_prices = paths[-1]
-        ax2.hist(final_prices, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
-        ax2.axvline(current_price, color='red', linestyle='--', linewidth=2, label='Current Price')
-        ax2.axvline(stats['mean_final_price'], color='green', linestyle='-', linewidth=2, label='Mean Final Price')
-        ax2.axvline(stats['median_final_price'], color='orange', linestyle='-', linewidth=2, label='Median Final Price')
-        ax2.set_title('Final Price Distribution')
-        ax2.set_xlabel('Final Price ($)')
-        ax2.set_ylabel('Frequency')
+        # 2. Price projection (top right)
+        ax2 = fig.add_subplot(gs[0, 1])
+        paths = projection_stats['paths']
+        
+        # Plot sample paths
+        sample_paths = paths[:, :200]  # Show 200 sample paths
+        time_axis = np.arange(len(sample_paths))
+        
+        for i in range(sample_paths.shape[1]):
+            ax2.plot(time_axis, sample_paths[:, i], alpha=0.1, color='blue')
+            
+        # Add percentile bands
+        percentiles = np.percentile(paths, [10, 25, 50, 75, 90], axis=1)
+        ax2.plot(time_axis, percentiles[2], 'r-', linewidth=2, label='Median')
+        ax2.fill_between(time_axis, percentiles[0], percentiles[4], alpha=0.2, color='red')
+        ax2.fill_between(time_axis, percentiles[1], percentiles[3], alpha=0.3, color='red')
+        
+        ax2.axhline(y=projection_stats['current_price'], color='black', linestyle='--', label='Current')
+        ax2.set_title(f'{self.projection_months}M Price Projection')
+        ax2.set_xlabel('Trading Days')
+        ax2.set_ylabel('Price ($)')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
-        # 3. Returns distribution
-        ax3 = axes[0, 2]
-        returns = ((final_prices / current_price - 1) * 100)
-        ax3.hist(returns, bins=50, alpha=0.7, color='lightgreen', edgecolor='black')
-        ax3.axvline(0, color='red', linestyle='--', linewidth=2, label='Break-even')
-        ax3.axvline(stats['mean_total_return'], color='blue', linestyle='-', linewidth=2, label='Mean Return')
-        ax3.set_title('Total Return Distribution')
-        ax3.set_xlabel('Total Return (%)')
-        ax3.set_ylabel('Frequency')
-        ax3.legend()
+        # 3. Technical indicators (middle left)
+        ax3 = fig.add_subplot(gs[1, 0])
+        
+        # Prepare technical indicators data
+        indicators = ['RSI\nSignal', 'MACD\nSignal', 'MA\nTrend', 'Volume\nSignal', 'Momentum\n5D']
+        values = []
+        
+        # Convert signals to numerical values
+        rsi_val = 100 if technical_signals['rsi_signal'] == 'OVERSOLD' else 0 if technical_signals['rsi_signal'] == 'OVERBOUGHT' else 50
+        macd_val = 100 if technical_signals['macd_signal'] == 'BUY' else 0
+        ma_val = 100 if technical_signals['ma_trend'] == 'BULLISH' else 0
+        vol_val = 100 if technical_signals['volume_signal'] == 'HIGH' else 50 if technical_signals['volume_signal'] == 'NORMAL' else 0
+        mom_val = max(0, min(100, (technical_signals['momentum_5d'] + 0.1) * 500))
+        
+        values = [rsi_val, macd_val, ma_val, vol_val, mom_val]
+        
+        bars = ax3.bar(indicators, values, color=['red', 'blue', 'green', 'orange', 'purple'])
+        ax3.set_title('Technical Indicators')
+        ax3.set_ylabel('Signal Strength')
+        ax3.set_ylim(0, 100)
+        
+        # Color bars based on values
+        for bar, val in zip(bars, values):
+            if val >= 70:
+                bar.set_color('green')
+            elif val >= 30:
+                bar.set_color('yellow')
+            else:
+                bar.set_color('red')
+                
         ax3.grid(True, alpha=0.3)
         
-        # 4. Profit/Loss distribution
-        ax4 = axes[1, 0]
-        shares = self.investment_per_stock / current_price
-        profit_loss = (final_prices * shares) - self.investment_per_stock
-        ax4.hist(profit_loss, bins=50, alpha=0.7, color='gold', edgecolor='black')
-        ax4.axvline(0, color='red', linestyle='--', linewidth=2, label='Break-even')
-        ax4.axvline(stats['mean_profit_loss'], color='blue', linestyle='-', linewidth=2, label='Mean P&L')
-        ax4.set_title('Profit/Loss Distribution')
-        ax4.set_xlabel('Profit/Loss ($)')
+        # 4. Returns distribution (middle right)
+        ax4 = fig.add_subplot(gs[1, 1])
+        returns = self.stock_data[ticker]['returns']
+        
+        # Histogram of returns
+        ax4.hist(returns, bins=50, alpha=0.7, color='skyblue', edgecolor='black')
+        ax4.axvline(returns.mean(), color='red', linestyle='--', label=f'Mean: {returns.mean():.3f}')
+        ax4.axvline(returns.median(), color='green', linestyle='--', label=f'Median: {returns.median():.3f}')
+        ax4.set_title('Returns Distribution')
+        ax4.set_xlabel('Daily Returns')
         ax4.set_ylabel('Frequency')
         ax4.legend()
         ax4.grid(True, alpha=0.3)
         
-        # 5. Momentum indicators
-        ax5 = axes[1, 1]
-        momentum = simulation_results['momentum']
-        indicators = ['RSI', 'MACD', 'BB Position', 'MA Momentum', 'Price vs MA50', 'Price vs MA200']
-        values = [momentum['rsi'], momentum['macd']*100, momentum['bb_position']*100, 
-                 momentum['ma_momentum']*100, momentum['price_vs_ma50']*100, momentum['price_vs_ma200']*100]
+        # 5. Investment summary (bottom left)
+        ax5 = fig.add_subplot(gs[2, 0])
+        ax5.axis('off')
         
-        bars = ax5.bar(indicators, values, color=['red', 'blue', 'green', 'orange', 'purple', 'brown'])
-        ax5.set_title('Current Momentum Indicators')
-        ax5.set_ylabel('Indicator Value')
-        ax5.tick_params(axis='x', rotation=45)
-        ax5.grid(True, alpha=0.3)
+        # Create investment summary
+        # Calculate position recommendation for existing positions
+        if ticker in self.existing_positions:
+            current_value = self.existing_positions[ticker]
+            position_recommendation = self.get_position_recommendation(investment_signal['signal'], investment_signal['combined_score'])
+            
+            # Calculate unrealized P&L
+            current_price = projection_stats['current_price']
+            target_price = projection_stats['mean_target_price']
+            shares = current_value / current_price
+            unrealized_pnl = (target_price - current_price) * shares
+            pnl_percent = (unrealized_pnl / current_value) * 100
+            
+            inv_text = f"""
+INVESTMENT RECOMMENDATION
+━━━━━━━━━━━━━━━━━━━━━━━━
+Signal: {investment_signal['signal']} {investment_signal['signal_color']}
+Combined Score: {investment_signal['combined_score']:.1f}/100
+Risk Level: {investment_signal['risk_level']}
+
+EXISTING POSITION
+━━━━━━━━━━━━━━━━━━━━━━━━
+Recommendation: {position_recommendation}
+Current Value: {self.format_currency(current_value, ticker)}
+Unrealized P&L: {self.format_currency(unrealized_pnl, ticker)} ({pnl_percent:+.1f}%)
+        """
+        else:
+            inv_text = f"""
+INVESTMENT RECOMMENDATION
+━━━━━━━━━━━━━━━━━━━━━━━━
+Signal: {investment_signal['signal']} {investment_signal['signal_color']}
+Combined Score: {investment_signal['combined_score']:.1f}/100
+Risk Level: {investment_signal['risk_level']}
+
+NEW INVESTMENT IDEA
+━━━━━━━━━━━━━━━━━━━━━━━━
+Recommended: {investment_signal['position_size']*100:.0f}% of planned
+Suggested Amount: {self.format_currency(5000 * investment_signal['position_size'], ticker)}
+        """
+
+        inv_text += f"""
+
+PRICE TARGETS ({self.projection_months}M)
+━━━━━━━━━━━━━━━━━━━━━━━━
+Current: {self.format_currency(projection_stats['current_price'], ticker)}
+Target: {self.format_currency(projection_stats['mean_target_price'], ticker)}
+Upside: {self.format_currency(projection_stats['upside_target'], ticker)}
+Downside: {self.format_currency(projection_stats['downside_target'], ticker)}
+        """
         
-        # Color bars based on bullish/bearish signals
-        for i, (bar, val) in enumerate(zip(bars, values)):
-            if i == 0:  # RSI
-                bar.set_color('red' if val > 70 else 'green' if val < 30 else 'yellow')
-            elif i == 2:  # BB Position
-                bar.set_color('red' if val > 80 else 'green' if val < 20 else 'yellow')
-            else:
-                bar.set_color('green' if val > 0 else 'red')
+        ax5.text(0.05, 0.95, inv_text, transform=ax5.transAxes, 
+                fontsize=10, verticalalignment='top', fontfamily='monospace')
         
-        # 6. Risk metrics
-        ax6 = axes[1, 2]
-        risk_metrics = {
-            'VaR (5%)': stats['var_5'],
-            'CVaR (5%)': stats['cvar_5'],
-            'Max Loss': stats['max_drawdown'],
-            'Mean P&L': stats['mean_profit_loss'],
-            'Upside (95%)': stats['upside_potential']
-        }
+        # 6. Risk & Performance (bottom right)
+        ax6 = fig.add_subplot(gs[2, 1])
+        ax6.axis('off')
         
-        colors = ['red', 'darkred', 'red', 'blue', 'green']
-        bars = ax6.bar(risk_metrics.keys(), risk_metrics.values(), color=colors, alpha=0.7)
-        ax6.set_title('Risk Metrics')
-        ax6.set_ylabel('Value ($)')
-        ax6.tick_params(axis='x', rotation=45)
-        ax6.grid(True, alpha=0.3)
-        ax6.axhline(y=0, color='black', linestyle='-', alpha=0.5)
+        # Create risk and performance summary
+        risk_text = f"""
+RISK & PERFORMANCE
+━━━━━━━━━━━━━━━━━━━━━━━━
+Effective Volatility: {investment_signal['effective_volatility']:.1%}
+VaR (95%): {investment_signal['var_95']:.1%}
+Max Drawdown Prob: {investment_signal['max_drawdown_prob']:.1%}
+Profit Probability: {projection_stats['probability_profit']:.1f}%
+Expected P&L: ${projection_stats['expected_return']:,.0f}
+Risk (5%): ${projection_stats['risk_5_percent']:,.0f}
+Upside (95%): ${projection_stats['upside_potential']:,.0f}
+
+KEY METRICS
+━━━━━━━━━━━━━━━━━━━━━━━━
+Sharpe Ratio: {statistical_data['sharpe_ratio']:.2f}
+Implied Vol Used: {'Yes' if statistical_data['implied_volatility'] else 'No'}
+Tech Score: {investment_signal['tech_score']:.1f}/100
+Statistical Score: {statistical_data['statistical_score']:.1f}/100
+        """
+        
+        ax6.text(0.05, 0.95, risk_text, transform=ax6.transAxes, 
+                fontsize=10, verticalalignment='top', fontfamily='monospace')
         
         plt.tight_layout()
         
         # Save plot
-        plot_filename = f'{ticker}_analysis.png'
+        plot_filename = f'{ticker}_detailed_analysis.png'
         plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
         plt.close()
         
         return plot_filename
         
-    def run_analysis(self):
-        """Run the complete analysis for all stocks"""
-        print("\n" + "="*60)
-        print("RUNNING ADVANCED STOCK PROJECTION ANALYSIS")
-        print("="*60)
+    def generate_strategy_report(self):
+        """Generate focused strategy report with embedded images"""
+        output_file = f'Strategic_Investment_Report_{datetime.now().strftime("%Y%m%d_%H%M")}.xlsx'
+        
+        print(f"\nGenerating strategy report: {output_file}")
+        
+        with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+            workbook = writer.book
+            
+            # Define formats
+            header_format = workbook.add_format({
+                'bold': True,
+                'text_wrap': True,
+                'valign': 'top',
+                'fg_color': '#4472C4',
+                'color': 'white',
+                'border': 1
+            })
+            
+            # Streamlined Investment Dashboard - Only Key Metrics
+            dashboard_data = []
+            for ticker in self.results:
+                result = self.results[ticker]
+                stock_data = self.stock_data[ticker]
+                
+                # Calculate investment amount based on existing position or new idea
+                if ticker in self.existing_positions:
+                    investment_amount = self.existing_positions[ticker]
+                    position_type = "EXISTING"
+                else:
+                    investment_amount = self.calculate_position_size(ticker, result)
+                    position_type = "NEW IDEA"
+                
+                dashboard_data.append({
+                    'Ticker': ticker,
+                    'Position Type': position_type,
+                    'Signal': result['signal']['signal'],
+                    'Score': f"{result['signal']['combined_score']:.1f}/100",
+                    'Current Price': self.format_currency(result['projection']['current_price'], ticker),
+                    'Target Price': self.format_currency(result['projection']['mean_target_price'], ticker),
+                    'Upside %': f"{((result['projection']['mean_target_price']/result['projection']['current_price']-1)*100):+.1f}%",
+                                    'Investment (CAD)': self.format_currency(self.convert_currency(investment_amount, ticker), 'CAD'),
+                'Expected P&L (CAD)': self.format_currency(self.convert_currency(result['projection']['expected_return'], ticker), 'CAD'),
+                    'Risk Level': result['signal']['risk_level'],
+                    'Profit Probability': f"{result['projection']['probability_profit']:.1f}%"
+                })
+            
+            dashboard_df = pd.DataFrame(dashboard_data)
+            dashboard_df.to_excel(writer, sheet_name='Investment Summary', index=False)
+            
+            # Format the dashboard
+            worksheet = writer.sheets['Investment Summary']
+            worksheet.write(0, 0, 'Investments')
+            worksheet.set_row(0, 30, header_format)
+            
+            # Auto-adjust column widths
+            for idx, col in enumerate(dashboard_df.columns):
+                series = dashboard_df[col]
+                max_len = max(series.astype(str).map(len).max(), len(col)) + 2
+                worksheet.set_column(idx, idx, max_len)
+            
+            # Key Technical Indicators - Including P/E Ratio
+            tech_data = []
+            for ticker in self.results:
+                result = self.results[ticker]
+                # Get P/E ratio from stock info
+                pe_ratio = self.stock_data[ticker]['info'].get('trailingPE', 0) or 0
+                tech_data.append({
+                    'Ticker': ticker,
+                    'RSI': f"{result['technical']['rsi']:.1f}",
+                    'RSI Signal': result['technical']['rsi_signal'],
+                    'MACD Signal': result['technical']['macd_signal'],
+                    'MA Trend': result['technical']['ma_trend'],
+                    'Momentum 5D': f"{result['technical']['momentum_5d']:.2%}",
+                    'P/E Ratio': f"{pe_ratio:.1f}" if pe_ratio > 0 else "N/A",
+                    'Volatility': f"{result['technical']['volatility']:.1%}",
+                    'Tech Score': f"{result['signal']['tech_score']:.1f}/100"
+                })
+            
+            tech_df = pd.DataFrame(tech_data)
+            tech_df.to_excel(writer, sheet_name='Technical Analysis', index=False)
+            
+            # Format technical sheet
+            tech_worksheet = writer.sheets['Technical Analysis']
+            tech_worksheet.set_row(0, 30, header_format)
+            
+            for idx, col in enumerate(tech_df.columns):
+                series = tech_df[col]
+                max_len = max(series.astype(str).map(len).max(), len(col)) + 2
+                tech_worksheet.set_column(idx, idx, max_len)
+            
+            # Statistical Analysis - GBM and Risk Metrics
+            stat_data = []
+            for ticker in self.results:
+                result = self.results[ticker]
+                stat_info = result['statistical']
+                stat_data.append({
+                    'Ticker': ticker,
+                    'Historical Vol': f"{stat_info['historical_volatility']:.1%}",
+                    'Implied Vol': f"{stat_info['implied_volatility']:.1%}" if stat_info['implied_volatility'] else "N/A",
+                    'Effective Vol': f"{stat_info['effective_volatility']:.1%}",
+                    'Sharpe Ratio': f"{stat_info['sharpe_ratio']:.2f}",
+                    'VaR (95%)': f"{stat_info['var_95']:.1%}",
+                    'Max Drawdown Prob': f"{stat_info['max_drawdown_probability']:.1%}",
+                    'Statistical Score': f"{stat_info['statistical_score']:.1f}/100"
+                })
+            
+            stat_df = pd.DataFrame(stat_data)
+            stat_df.to_excel(writer, sheet_name='Statistical Analysis', index=False)
+            
+            # Format statistical sheet
+            stat_worksheet = writer.sheets['Statistical Analysis']
+            stat_worksheet.set_row(0, 30, header_format)
+            
+            for idx, col in enumerate(stat_df.columns):
+                series = stat_df[col]
+                max_len = max(series.astype(str).map(len).max(), len(col)) + 2
+                stat_worksheet.set_column(idx, idx, max_len)
+            
+            # Streamlined Portfolio Summary - Only Essential Data
+            portfolio_data = []
+            total_existing = sum(self.existing_positions.values()) if self.existing_positions else 0
+            total_expected_return = 0
+            
+            for ticker in self.results:
+                result = self.results[ticker]
+                
+                if ticker in self.existing_positions:
+                    investment = self.existing_positions[ticker]
+                    position_type = "EXISTING"
+                else:
+                    investment = self.calculate_position_size(ticker, result)
+                    position_type = "NEW IDEA"
+                
+                total_expected_return += result['projection']['expected_return']
+                
+                portfolio_data.append({
+                    'Ticker': ticker,
+                    'Position Type': position_type,
+                    'Signal': result['signal']['signal'],
+                    'Investment (CAD)': self.format_currency(self.convert_currency(investment, ticker), 'CAD'),
+                    'Expected Return (CAD)': self.format_currency(self.convert_currency(result['projection']['expected_return'], ticker), 'CAD'),
+                    'Risk Level': result['signal']['risk_level'],
+                    'Profit Probability': f"{result['projection']['probability_profit']:.1f}%"
+                })
+            
+            # Calculate portfolio totals in CAD
+            total_existing_cad = 0
+            total_expected_return_cad = 0
+            
+            for ticker in self.results:
+                result = self.results[ticker]
+                if ticker in self.existing_positions:
+                    investment = self.existing_positions[ticker]
+                else:
+                    investment = self.calculate_position_size(ticker, result)
+                
+                total_existing_cad += self.convert_currency(investment, ticker)
+                total_expected_return_cad += self.convert_currency(result['projection']['expected_return'], ticker)
+            
+            # Add portfolio totals
+            portfolio_data.append({
+                'Ticker': 'TOTAL PORTFOLIO',
+                'Position Type': '',
+                'Signal': '',
+                'Investment (CAD)': self.format_currency(total_existing_cad, 'CAD'),
+                'Expected Return (CAD)': self.format_currency(total_expected_return_cad, 'CAD'),
+                'Risk Level': '',
+                'Profit Probability': ''
+            })
+            
+            portfolio_df = pd.DataFrame(portfolio_data)
+            portfolio_df.to_excel(writer, sheet_name='Portfolio Summary', index=False)
+            
+            # Format portfolio sheet
+            portfolio_worksheet = writer.sheets['Portfolio Summary']
+            portfolio_worksheet.set_row(0, 30, header_format)
+            
+            for idx, col in enumerate(portfolio_df.columns):
+                series = portfolio_df[col]
+                max_len = max(series.astype(str).map(len).max(), len(col)) + 2
+                portfolio_worksheet.set_column(idx, idx, max_len)
+            
+            # Highlight the total row
+            total_format = workbook.add_format({
+                'bold': True,
+                'fg_color': '#FFFF00',
+                'border': 1
+            })
+            
+            last_row = len(portfolio_df)
+            portfolio_worksheet.set_row(last_row, None, total_format)
+            
+            # Create Visual Dashboard sheet with embedded images
+            visual_worksheet = workbook.add_worksheet('Visual Dashboard')
+            
+            # Add title without merge to avoid conflicts
+            title_format = workbook.add_format({
+                'bold': True,
+                'font_size': 16,
+                'align': 'center'
+            })
+            visual_worksheet.write(0, 0, 'PORTFOLIO VISUAL ANALYSIS', title_format)
+            
+            # Embed individual stock analysis images
+            row_position = 5  # Start position for individual charts (moved up since no portfolio correlation image)
+            col_position = 0
+            
+            for i, ticker in enumerate(self.results):
+                image_filename = f'{ticker}_detailed_analysis.png'
+                if os.path.exists(image_filename):
+                    # Add stock title without merge
+                    stock_title_format = workbook.add_format({
+                        'bold': True,
+                        'font_size': 12,
+                        'fg_color': '#E6F3FF'
+                    })
+                    visual_worksheet.write(row_position, col_position, f'{ticker} ANALYSIS', stock_title_format)
+                    
+                    # Insert image
+                    visual_worksheet.insert_image(row_position + 1, col_position, image_filename, {
+                        'x_offset': 10,
+                        'y_offset': 10,
+                        'x_scale': 0.6,
+                        'y_scale': 0.6
+                    })
+                    
+                    # Move to next position (first stock in A, second stock in E)
+                    if col_position == 0:  # First stock in row
+                        col_position = 4  # Move to column E for second stock
+                    else:  # Second stock in row, move to next row
+                        col_position = 0
+                        row_position += 35  # Space for next row of images
+            
+            # Add Options Images Section
+            options_row_position = row_position + 10  # Start after stock analysis images
+            options_col_position = 0
+            
+            # Add options section title
+            options_title_format = workbook.add_format({
+                'bold': True,
+                'font_size': 14,
+                'fg_color': '#FFE6CC',
+                'align': 'center'
+            })
+            visual_worksheet.write(options_row_position, 0, 'OPTIONS STRATEGY VISUALIZATIONS', options_title_format)
+            visual_worksheet.merge_range(options_row_position, 0, options_row_position, 3, 'OPTIONS STRATEGY VISUALIZATIONS', options_title_format)
+            
+            options_row_position += 5  # Space after title
+            
+            # Embed options analysis images
+            for i, ticker in enumerate(self.results):
+                if ticker in self.results and self.results[ticker].get('options'):
+                    # Enhanced options analysis image
+                    enhanced_options_filename = f'{ticker}_enhanced_options_analysis.png'
+                    if os.path.exists(enhanced_options_filename):
+                        # Add ticker title for enhanced options
+                        ticker_options_format = workbook.add_format({
+                            'bold': True,
+                            'font_size': 11,
+                            'fg_color': '#FFF2CC'
+                        })
+                        visual_worksheet.write(options_row_position, options_col_position, f'{ticker} ENHANCED OPTIONS', ticker_options_format)
+                        
+                        # Insert enhanced options analysis image
+                        visual_worksheet.insert_image(options_row_position + 1, options_col_position, enhanced_options_filename, {
+                            'x_offset': 10,
+                            'y_offset': 10,
+                            'x_scale': 0.4,
+                            'y_scale': 0.4
+                        })
+                        
+                        options_col_position += 2
+                        if options_col_position >= 4:  # 4 columns max
+                            options_col_position = 0
+                            options_row_position += 35  # Space for next row of options images
+                    
+                    # Volatility surface image
+                    volatility_surface_filename = f'{ticker}_volatility_surface.png'
+                    if os.path.exists(volatility_surface_filename):
+                        # Add ticker title for volatility surface
+                        ticker_surface_format = workbook.add_format({
+                            'bold': True,
+                            'font_size': 11,
+                            'fg_color': '#E6F3FF'
+                        })
+                        visual_worksheet.write(options_row_position, options_col_position, f'{ticker} VOLATILITY SURFACE', ticker_surface_format)
+                        
+                        # Insert volatility surface image
+                        visual_worksheet.insert_image(options_row_position + 1, options_col_position, volatility_surface_filename, {
+                            'x_offset': 10,
+                            'y_offset': 10,
+                            'x_scale': 0.4,
+                            'y_scale': 0.4
+                        })
+                        
+                        options_col_position += 2
+                        if options_col_position >= 4:  # 4 columns max
+                            options_col_position = 0
+                            options_row_position += 35  # Space for next row of options images
+                    
+                    # Volatility smile image
+                    volatility_smile_filename = f'{ticker}_volatility_smile.png'
+                    if os.path.exists(volatility_smile_filename):
+                        # Add ticker title for volatility smile
+                        ticker_smile_format = workbook.add_format({
+                            'bold': True,
+                            'font_size': 11,
+                            'fg_color': '#E6F3FF'
+                        })
+                        visual_worksheet.write(options_row_position, options_col_position, f'{ticker} VOLATILITY SMILE', ticker_smile_format)
+                        
+                        # Insert volatility smile image
+                        visual_worksheet.insert_image(options_row_position + 1, options_col_position, volatility_smile_filename, {
+                            'x_offset': 10,
+                            'y_offset': 10,
+                            'x_scale': 0.4,
+                            'y_scale': 0.4
+                        })
+                        
+                        options_col_position += 2
+                        if options_col_position >= 4:  # 4 columns max
+                            options_col_position = 0
+                            options_row_position += 35  # Space for next row of options images
+                    
+                    # Options chain image (keep for reference)
+                    options_chain_filename = f'{ticker}_options_chain.png'
+                    if os.path.exists(options_chain_filename):
+                        # Add ticker title for options chain
+                        ticker_chain_format = workbook.add_format({
+                            'bold': True,
+                            'font_size': 11,
+                            'fg_color': '#FFF2CC'
+                        })
+                        visual_worksheet.write(options_row_position, options_col_position, f'{ticker} OPTIONS CHAIN', ticker_chain_format)
+                        
+                        # Insert options chain image
+                        visual_worksheet.insert_image(options_row_position + 1, options_col_position, options_chain_filename, {
+                            'x_offset': 10,
+                            'y_offset': 10,
+                            'x_scale': 0.4,
+                            'y_scale': 0.4
+                        })
+                        
+                        options_col_position += 2
+                        if options_col_position >= 4:  # 4 columns max
+                            options_col_position = 0
+                            options_row_position += 35  # Space for next row of options images
+            
+            # Set column widths for visual dashboard
+            visual_worksheet.set_column(0, 3, 25)
+            
+            # Add Options Strategies Sheet
+            if any(ticker in self.results and self.results[ticker].get('options') for ticker in self.tickers):
+                options_data = []
+                for ticker in self.results:
+                    if ticker in self.results and self.results[ticker].get('options'):
+                        options = self.results[ticker]['options']
+                        for strategy_name, strategy_data in options.items():
+                            # Helper function to safely format values
+                            def safe_format(value, format_str):
+                                if isinstance(value, (int, float)) and value != float('inf'):
+                                    return format_str.format(value)
+                                elif value == float('inf'):
+                                    return "Unlimited"
+                                else:
+                                    return str(value)
+                            
+                            # Get strike value safely
+                            strike_val = strategy_data.get('strike', strategy_data.get('lower_strike', 'N/A'))
+                            if isinstance(strike_val, (int, float)):
+                                strike_str = self.format_currency(strike_val, ticker)
+                            else:
+                                strike_str = f"{'C$' if self.detect_currency(ticker) else '$'}{strike_val}"
+                            
+                            # Get premium/cost value safely
+                            premium_val = strategy_data.get('premium', strategy_data.get('debit', strategy_data.get('total_premium', 0)))
+                            if isinstance(premium_val, (int, float)):
+                                premium_str = self.format_currency(premium_val, ticker)
+                            else:
+                                premium_str = f"{'C$' if self.detect_currency(ticker) else '$'}{premium_val}"
+                            
+                            # Get breakeven value safely
+                            breakeven_val = strategy_data.get('breakeven', strategy_data.get('breakeven_up', 'N/A'))
+                            if isinstance(breakeven_val, (int, float)):
+                                breakeven_str = self.format_currency(breakeven_val, ticker)
+                            else:
+                                breakeven_str = f"{'C$' if self.detect_currency(ticker) else '$'}{breakeven_val}"
+                            
+                            # Get risk/reward value safely
+                            rr_val = strategy_data.get('risk_reward_ratio', 'N/A')
+                            rr_str = f"{rr_val:.2f}" if isinstance(rr_val, (int, float)) and rr_val != float('inf') else str(rr_val)
+                            
+                            # Enhanced options data with more details
+                            strategy_name = strategy_data.get('strategy', 'Unknown')
+                            
+                            # Get detailed strike information
+                            if strategy_name == 'Covered Call':
+                                strike_val = strategy_data.get('strike', 'N/A')
+                                if isinstance(strike_val, (int, float)):
+                                    strike_info = self.format_currency(strike_val, ticker)
+                                else:
+                                    strike_info = f"{'C$' if self.detect_currency(ticker) else '$'}{strike_val}"
+                                
+                                premium_val = strategy_data.get('premium', 0)
+                                premium_info = self.format_currency(premium_val, ticker)
+                                
+                                upside_cap_val = strategy_data.get('upside_cap', 'N/A')
+                                if isinstance(upside_cap_val, (int, float)):
+                                    additional_info = f"Upside Cap: {self.format_currency(upside_cap_val, ticker)}"
+                                else:
+                                    additional_info = f"Upside Cap: {'C$' if self.detect_currency(ticker) else '$'}{upside_cap_val}"
+                                annual_return = f"{strategy_data.get('annualized_return', 0):.1f}%"
+                                
+                            elif strategy_name == 'Long Call':
+                                strike_val = strategy_data.get('strike', 'N/A')
+                                if isinstance(strike_val, (int, float)):
+                                    strike_info = self.format_currency(strike_val, ticker)
+                                else:
+                                    strike_info = f"{'C$' if self.detect_currency(ticker) else '$'}{strike_val}"
+                                
+                                premium_val = strategy_data.get('premium', 0)
+                                premium_info = self.format_currency(premium_val, ticker)
+                                
+                                potential_return = strategy_data.get('potential_return_10pct_move', 0)
+                                additional_info = f"10% Move Return: {potential_return:.1f}%"
+                                annual_return = f"{potential_return:.1f}%"
+                                
+                            elif strategy_name == 'Long Put':
+                                strike_val = strategy_data.get('strike', 'N/A')
+                                if isinstance(strike_val, (int, float)):
+                                    strike_info = self.format_currency(strike_val, ticker)
+                                else:
+                                    strike_info = f"{'C$' if self.detect_currency(ticker) else '$'}{strike_val}"
+                                
+                                premium_val = strategy_data.get('premium', 0)
+                                premium_info = self.format_currency(premium_val, ticker)
+                                
+                                potential_return = strategy_data.get('potential_return_10pct_move', 0)
+                                additional_info = f"10% Move Return: {potential_return:.1f}%"
+                                annual_return = f"{potential_return:.1f}%"
+                                
+                            else:
+                                strike_info = strike_str
+                                premium_info = premium_str
+                                additional_info = "N/A"
+                                annual_return = "N/A"
+                            
+                            # Get liquidity information
+                            liquidity = strategy_data.get('liquidity', 'UNKNOWN')
+                            
+                            # Convert max profit and max loss to CAD
+                            max_profit_val = strategy_data.get('max_profit', 0)
+                            max_loss_val = strategy_data.get('max_loss', 0)
+                            
+                            if isinstance(max_profit_val, (int, float)):
+                                max_profit_cad = self.convert_to_cad(max_profit_val)
+                                max_profit_str = self.format_currency(max_profit_cad, ticker)
+                            else:
+                                max_profit_str = f"C${max_profit_val}"
+                                
+                            if isinstance(max_loss_val, (int, float)):
+                                max_loss_cad = self.convert_to_cad(max_loss_val)
+                                max_loss_str = self.format_currency(max_loss_cad, ticker)
+                            else:
+                                max_loss_str = f"C${max_loss_val}"
+                            
+                            # Get Greeks information
+                            delta = strategy_data.get('delta', 'N/A')
+                            gamma = strategy_data.get('gamma', 'N/A')
+                            theta = strategy_data.get('theta', 'N/A')
+                            vega = strategy_data.get('vega', 'N/A')
+                            iv = strategy_data.get('implied_volatility', 'N/A')
+                            
+                            # Format Greeks
+                            delta_str = f"{delta:.3f}" if isinstance(delta, (int, float)) else str(delta)
+                            gamma_str = f"{gamma:.4f}" if isinstance(gamma, (int, float)) else str(gamma)
+                            theta_str = f"{theta:.4f}" if isinstance(theta, (int, float)) else str(theta)
+                            vega_str = f"{vega:.2f}" if isinstance(vega, (int, float)) else str(vega)
+                            iv_str = f"{iv:.1%}" if isinstance(iv, (int, float)) else str(iv)
+                            
+                            options_data.append({
+                                'Ticker': ticker,
+                                'Strategy': strategy_name,
+                                'Strike/Details': strike_info,
+                                'Premium/Cost': premium_info,
+                                'Max Profit': max_profit_str,
+                                'Max Loss': max_loss_str,
+                                'Breakeven': breakeven_str,
+                                'Risk/Reward': rr_str,
+                                'Annual Return': annual_return,
+                                'Additional Info': additional_info,
+                                'Liquidity': liquidity,
+                                'Profit Probability': f"{strategy_data.get('probability_profit', 0):.1f}%",
+                                'Recommendation': strategy_data.get('recommendation', 'N/A'),
+                                'Implied Vol': iv_str,
+                                'Delta': delta_str,
+                                'Gamma': gamma_str,
+                                'Theta': theta_str,
+                                'Vega': vega_str
+                            })
+                
+                if options_data:
+                    options_df = pd.DataFrame(options_data)
+                    options_df.to_excel(writer, sheet_name='Options Strategies', index=False)
+                    
+                    # Format options sheet
+                    options_worksheet = writer.sheets['Options Strategies']
+                    options_worksheet.set_row(0, 30, header_format)
+                    
+                    for idx, col in enumerate(options_df.columns):
+                        series = options_df[col]
+                        max_len = max(series.astype(str).map(len).max(), len(col)) + 2
+                        options_worksheet.set_column(idx, idx, max_len)
+            
+            # Add Speculation Ideas Sheet if any planning stocks
+            if self.planning_stocks:
+                spec_worksheet = workbook.add_worksheet('Speculation Ideas')
+                spec_worksheet.write(0, 0, 'SPECULATION/PLANNING IDEAS')
+                row = 2
+                for ticker in self.planning_stocks:
+                    # Visual
+                    image_filename = f'{ticker}_detailed_analysis.png'
+                    if os.path.exists(image_filename):
+                        spec_worksheet.write(row, 0, f'{ticker} VISUAL')
+                        spec_worksheet.insert_image(row + 1, 0, image_filename, {
+                            'x_offset': 10,
+                            'y_offset': 10,
+                            'x_scale': 0.6,
+                            'y_scale': 0.6
+                        })
+                        row += 22
+                    # Suggestion
+                    # (Assume self.results[ticker] exists for planning stocks)
+                    if ticker in self.results:
+                        result = self.results[ticker]
+                        inv_signal = result['signal']
+                        planned_amount = 5000 * inv_signal['position_size']
+                        suggestion = f"Suggested: {inv_signal['position_size']*100:.0f}% of planned, Amount: {self.format_currency(planned_amount, ticker)}"
+                        spec_worksheet.write(row, 0, suggestion)
+                        row += 2
+            
+        print(f"Report generated: {output_file}")
+        print("All analysis images and options visualizations embedded in Excel file")
+        
+    def print_portfolio_summary(self):
+        """Print comprehensive portfolio summary"""
+        print(f"\n{'='*80}")
+        print("PORTFOLIO INVESTMENT SUMMARY")
+        print(f"{'='*80}")
+        
+        # Calculate portfolio metrics
+        buy_signals = []
+        hold_signals = []
+        sell_signals = []
+        total_existing = sum(self.existing_positions.values()) if self.existing_positions else 0
+        total_expected_return = 0
+        high_risk_count = 0
+        
+        # Analyze existing positions
+        existing_positions_analysis = []
+        new_ideas_analysis = []
+        
+        for ticker in self.results:
+            result = self.results[ticker]
+            signal = result['signal']['signal']
+            
+            if ticker in self.existing_positions:
+                # Existing position analysis
+                existing_amount = self.existing_positions[ticker]
+                position_value = existing_amount * (result['projection']['mean_target_price'] / result['projection']['current_price'])
+                unrealized_pnl = position_value - existing_amount
+                
+                existing_positions_analysis.append({
+                    'ticker': ticker,
+                    'existing_amount': existing_amount,
+                    'current_value': position_value,
+                    'unrealized_pnl': unrealized_pnl,
+                    'signal': signal,
+                    'recommendation': self.get_position_recommendation(signal, result['signal']['combined_score'])
+                })
+                
+                total_expected_return += unrealized_pnl
+            else:
+                # New investment idea
+                if self.new_investment_ideas:
+                    suggested_investment = 5000  # Default suggestion
+                    expected_return = result['projection']['expected_return']
+                    
+                    new_ideas_analysis.append({
+                        'ticker': ticker,
+                        'suggested_investment': suggested_investment,
+                        'expected_return': expected_return,
+                        'signal': signal,
+                        'score': result['signal']['combined_score']
+                    })
+            
+            if result['signal']['risk_level'] == 'HIGH':
+                high_risk_count += 1
+            
+            if signal in ['STRONG BUY', 'BUY']:
+                buy_signals.append(ticker)
+            elif signal == 'HOLD':
+                hold_signals.append(ticker)
+            else:
+                sell_signals.append(ticker)
+        
+        # Print summary
+        print(f"SIGNALS BREAKDOWN:")
+        print(f"   🟢 BUY: {len(buy_signals)} stocks - {', '.join(buy_signals) if buy_signals else 'None'}")
+        print(f"   🟠 HOLD: {len(hold_signals)} stocks - {', '.join(hold_signals) if hold_signals else 'None'}")
+        print(f"   🔴 SELL: {len(sell_signals)} stocks - {', '.join(sell_signals) if sell_signals else 'None'}")
+        
+        print(f"\nEXISTING POSITIONS ANALYSIS:")
+        if existing_positions_analysis:
+            for pos in existing_positions_analysis:
+                print(f"   {pos['ticker']}: ${pos['existing_amount']:,.0f} → ${pos['current_value']:,.0f} ({pos['unrealized_pnl']:+,.0f}) [{pos['signal']}] {pos['recommendation']}")
+            print(f"   Total Existing: ${total_existing:,.0f}")
+            print(f"   Total Unrealized P&L: ${total_expected_return:+,.0f}")
+        else:
+            print(f"   No existing positions")
+        
+        if self.new_investment_ideas and new_ideas_analysis:
+            print(f"\nNEW INVESTMENT IDEAS:")
+            # Sort by score
+            new_ideas_analysis.sort(key=lambda x: x['score'], reverse=True)
+            for idea in new_ideas_analysis[:5]:  # Top 5 ideas
+                print(f"   {idea['ticker']}: {idea['signal']} (Score: {idea['score']:.1f}/100) - Suggested: ${idea['suggested_investment']:,.0f}")
+        
+        print(f"\nEXPECTED PERFORMANCE:")
+        print(f"   Expected Total Return: ${total_expected_return:,.0f}")
+        if total_existing > 0:
+            print(f"   Expected Portfolio Return: {(total_expected_return / total_existing) * 100:.1f}%")
+        print(f"   High Risk Positions: {high_risk_count}/{len(self.tickers)}")
+        
+        # Print top recommendations
+        print(f"\nTOP RECOMMENDATIONS:")
+        sorted_results = sorted(self.results.items(), 
+                              key=lambda x: x[1]['signal']['combined_score'], 
+                              reverse=True)
+        
+        for i, (ticker, result) in enumerate(sorted_results[:3]):
+            print(f"   {i+1}. {ticker}: {result['signal']['signal']} {result['signal']['signal_color']}")
+            print(f"      Score: {result['signal']['combined_score']:.1f}/100")
+            if ticker in self.existing_positions:
+                print(f"      Existing Position: ${self.existing_positions[ticker]:,.0f}")
+            else:
+                suggested = self.calculate_position_size(ticker, result)
+                print(f"      Suggested Investment: ${suggested:,.0f}")
+            print(f"      Expected Return: ${result['projection']['expected_return']:,.0f}")
+        
+        
+        print(f"\n{'='*80}")
+        
+    def run_complete_analysis(self):
+        """Run complete strategic analysis"""
+        print(f"\n{'='*60}")
+        print(" STRATEGIC STOCK ANALYSIS")
+        print(f"{'='*60}")
         
         # Fetch data
         self.fetch_data()
         
-        # Run analysis for each stock
+        # Analyze each stock
         for ticker in self.tickers:
             if ticker not in self.stock_data:
                 continue
                 
             print(f"\nAnalyzing {ticker}...")
             
-            # Run enhanced GBM simulation
-            simulation_results = self.enhanced_gbm_simulation(ticker)
+            # Fetch options data
+            options_data = self.fetch_options_data(ticker)
+            self.options_data[ticker] = options_data
             
-            # Analyze projections
-            stats = self.analyze_projections(ticker, simulation_results)
-            # Momentum Interpretation (Console)
-            momentum_summary = self.interpret_momentum_indicators(simulation_results['momentum'])
-
-            print(f"\nMomentum Interpretation for {ticker}:")
-            for key, interpretation in momentum_summary.items():
-                print(f"  {key}: {interpretation}")
+            # Run all analysis components
+            technical_signals = self.calculate_technical_signals(ticker)
+            statistical_data = self.calculate_statistical_analysis(ticker)
+            investment_signal = self.generate_investment_signal(ticker, technical_signals, statistical_data)
+            projection_stats = self.run_projection_simulation(ticker)
             
-            # Create visualizations
-            plot_filename = self.create_visualizations(ticker, simulation_results, stats)
+            # Analyze option strategies
+            option_strategies = self.analyze_option_strategies(ticker) if options_data else None
+            
+            # Create visualization
+            plot_filename = self.create_stock_visualization(ticker)
             
             # Store results
             self.results[ticker] = {
-                'simulation': simulation_results,
-                'stats': stats,
+                'technical': technical_signals,
+                'statistical': statistical_data,
+                'signal': investment_signal,
+                'projection': projection_stats,
+                'options': option_strategies,
                 'plot': plot_filename
             }
             
-            print(f"✓ {ticker} analysis complete")
+            # Print quick summary
+            print(f"   Signal: {investment_signal['signal']} {investment_signal['signal_color']}")
+            print(f"   Score: {investment_signal['combined_score']:.1f}/100")
+            print(f"   Position: {investment_signal['position_size']*100:.0f}% of planned")
+            print(f"   Target: ${projection_stats['mean_target_price']:.2f} ({((projection_stats['mean_target_price']/projection_stats['current_price']-1)*100):+.1f}%)")
             
-        # Generate summary report
-        self.generate_report()
+        # Generate comprehensive report
+        self.generate_strategy_report()
         
-    def generate_report(self):
-        """Generate comprehensive Excel report"""
-        output_file = f'Advanced_Stock_Projections_{datetime.now().strftime("%Y%m%d_%H%M")}.xlsx'
+        # Create portfolio correlation analysis
+        portfolio_plot = self.create_portfolio_correlation_analysis()
         
-        print(f"\n Generating report: {output_file}")
+        # Print portfolio summary
+        self.print_portfolio_summary()
         
-        with pd.ExcelWriter(output_file, engine='xlsxwriter') as writer:
+        return self.results
+
+    def create_portfolio_correlation_analysis(self):
+        """Create portfolio correlation and heatmap analysis"""
+        if len(self.results) < 2:
+            return None
             
-            # Summary sheet
-            summary_data = []
-            for ticker in self.results:
-                stats = self.results[ticker]['stats']
-                simulation = self.results[ticker]['simulation']
-                
-                summary_data.append({
-                    'Ticker': ticker,
-                    'Current Price': f"${stats['current_price']:.2f}",
-                    'Investment': f"${stats['investment_amount']:,.0f}",
-                    'Shares': f"{stats['shares_purchased']:.2f}",
-                    'Mean Final Price': f"${stats['mean_final_price']:.2f}",
-                    'Mean Total Return %': f"{stats['mean_total_return']:.1f}%",
-                    'Mean Annual Return %': f"{stats['mean_annualized_return']:.1f}%",
-                    'Probability of Profit': f"{stats['probability_profit']:.1f}%",
-                    'Mean Profit/Loss': f"${stats['mean_profit_loss']:,.0f}",
-                    'VaR (5%)': f"${stats['var_5']:,.0f}",
-                    'Upside Potential': f"${stats['upside_potential']:,.0f}",
-                    'Base Volatility': f"{stats['base_sigma']:.1%}",
-                    'Adjusted Volatility': f"{stats['adjusted_sigma']:.1%}",
-                    'Momentum Adjustment': f"{simulation['momentum_adjustment']:.1%}",
-                    'Macro Adjustment': f"{simulation['macro_adjustment']:.1%}"
+        # Get price data for all stocks
+        price_data = {}
+        for ticker in self.results:
+            if ticker in self.stock_data:
+                price_data[ticker] = self.stock_data[ticker]['prices']
+        
+        # Create correlation matrix
+        price_df = pd.DataFrame(price_data)
+        returns_df = price_df.pct_change().dropna()
+        correlation_matrix = returns_df.corr()
+        
+        # Create figure
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle('Portfolio Correlation Analysis', fontsize=16, fontweight='bold')
+        
+        # 1. Correlation heatmap
+        ax1 = axes[0, 0]
+        sns.heatmap(correlation_matrix, annot=True, cmap='RdYlBu_r', center=0, 
+                   square=True, ax=ax1, cbar_kws={'shrink': 0.8})
+        ax1.set_title('Returns Correlation Matrix')
+        
+        # 2. Risk-return scatter plot
+        ax2 = axes[0, 1]
+        risk_return_data = []
+        for ticker in self.results:
+            if ticker in self.stock_data:
+                returns = self.stock_data[ticker]['returns']
+                volatility = returns.std() * np.sqrt(252)
+                avg_return = returns.mean() * 252
+                risk_return_data.append({
+                    'ticker': ticker,
+                    'volatility': volatility,
+                    'return': avg_return,
+                    'signal': self.results[ticker]['signal']['signal']
                 })
-            
-            summary_df = pd.DataFrame(summary_data)
-            summary_df.to_excel(writer, sheet_name='Summary', index=False)
-            
-            # Detailed statistics for each stock
-            for ticker in self.results:
-                stats = self.results[ticker]['stats']
-                simulation = self.results[ticker]['simulation']
-                
-                # Price projections
-                price_data = {
-                    'Metric': ['Current Price', 'Mean Final Price', 'Median Final Price', 
-                              '5th Percentile', '95th Percentile', 'Standard Deviation'],
-                    'Value': [stats['current_price'], stats['mean_final_price'], 
-                             stats['median_final_price'], stats['price_5th_percentile'],
-                             stats['price_95th_percentile'], stats['price_std']],
-                    'Formatted': [f"${x:.2f}" for x in [stats['current_price'], stats['mean_final_price'], 
-                                 stats['median_final_price'], stats['price_5th_percentile'],
-                                 stats['price_95th_percentile'], stats['price_std']]]
-                }
-                
-                # Returns analysis
-                return_data = {
-                    'Metric': ['Mean Total Return', 'Median Total Return', '5th Percentile', 
-                              '95th Percentile', 'Standard Deviation', 'Mean Annualized Return'],
-                    'Value (%)': [stats['mean_total_return'], stats['median_total_return'],
-                                 stats['return_5th_percentile'], stats['return_95th_percentile'],
-                                 stats['return_std'], stats['mean_annualized_return']]
-                }
-                
-                # Investment outcomes
-                investment_data = {
-                    'Metric': ['Investment Amount', 'Shares Purchased', 'Mean Final Value',
-                              'Median Final Value', 'Mean Profit/Loss', 'Probability of Profit',
-                              'VaR (5%)', 'CVaR (5%)', 'Max Drawdown', 'Upside Potential'],
-                    'Value': [stats['investment_amount'], stats['shares_purchased'], 
-                             stats['mean_final_value'], stats['median_final_value'],
-                             stats['mean_profit_loss'], stats['probability_profit'],
-                             stats['var_5'], stats['cvar_5'], stats['max_drawdown'],
-                             stats['upside_potential']]
-                }
-                
-                # Model parameters
-                model_data = {
-                    'Parameter': ['Base Drift (μ)', 'Adjusted Drift (μ)', 'Base Volatility (σ)',
-                                 'Adjusted Volatility (σ)', 'Momentum Adjustment', 'Macro Adjustment',
-                                 'Jump Intensity (λ)', 'Jump Mean', 'Jump Volatility'],
-                    'Value': [stats['base_mu'], stats['adjusted_mu'], stats['base_sigma'],
-                             stats['adjusted_sigma'], stats['momentum_adjustment'], 
-                             stats['macro_adjustment'], simulation['jump_params']['lambda'],
-                             simulation['jump_params']['mu_jump'], simulation['jump_params']['sigma_jump']]
-                }
-                
-                # Momentum indicators
-                momentum_data = {
-                    'Indicator': ['RSI', 'MACD', 'Bollinger Band Position', 'MA Momentum',
-                                 'Price vs MA50', 'Price vs MA200'],
-                    'Value': [simulation['momentum']['rsi'], simulation['momentum']['macd'],
-                             simulation['momentum']['bb_position'], simulation['momentum']['ma_momentum'],
-                             simulation['momentum']['price_vs_ma50'], simulation['momentum']['price_vs_ma200']]
-                }
-                # Add interpretation rows
-                momentum_summary = self.interpret_momentum_indicators(simulation['momentum'])
-                interpretation_df = pd.DataFrame(
-                    list(momentum_summary.items()),
-                    columns=pd.Index(['Indicator', 'Interpretation'])
-                )
-                interpretation_df.to_excel(writer, sheet_name=f'{ticker}_Momentum', index=False, startrow=10)
-
-                # Write to Excel
-                pd.DataFrame(price_data).to_excel(writer, sheet_name=f'{ticker}_Price', index=False)
-                pd.DataFrame(return_data).to_excel(writer, sheet_name=f'{ticker}_Returns', index=False)
-                pd.DataFrame(investment_data).to_excel(writer, sheet_name=f'{ticker}_Investment', index=False)
-                pd.DataFrame(model_data).to_excel(writer, sheet_name=f'{ticker}_Model', index=False)
-                pd.DataFrame(momentum_data).to_excel(writer, sheet_name=f'{ticker}_Momentum', index=False)
-                
-                # Add charts
-                worksheet = writer.sheets[f'{ticker}_Price']
-                worksheet.insert_image('F2', self.results[ticker]['plot'])
         
-        print(f" Report generated: {output_file}")
+        risk_df = pd.DataFrame(risk_return_data)
         
-        # Print summary to console
-        print("\n" + "="*60)
-        print("ANALYSIS SUMMARY")
-        print("="*60)
+        # Color by signal
+        colors = {'STRONG BUY': 'green', 'BUY': 'lightgreen', 'HOLD': 'orange', 
+                 'WEAK SELL': 'red', 'SELL': 'darkred'}
         
+        for signal in risk_df['signal'].unique():
+            subset = risk_df[risk_df['signal'] == signal]
+            ax2.scatter(subset['volatility'], subset['return'], 
+                       c=colors.get(signal, 'gray'), label=signal, s=100, alpha=0.7)
+        
+        ax2.set_xlabel('Annualized Volatility')
+        ax2.set_ylabel('Annualized Return')
+        ax2.set_title('Risk-Return Profile')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Investment allocation pie chart
+        ax3 = axes[1, 0]
+        investment_data = []
         for ticker in self.results:
-            stats = self.results[ticker]['stats']
-            print(f"\n{ticker}:")
-            print(f"  Current Price: ${stats['current_price']:.2f}")
-            print(f"  Mean Projected Return: {stats['mean_annualized_return']:.1f}% annually")
-            print(f"  Probability of Profit: {stats['probability_profit']:.1f}%")
-            print(f"  Expected P&L: ${stats['mean_profit_loss']:,.0f}")
-            print(f"  Risk (VaR 5%): ${stats['var_5']:,.0f}")
-            print(f"  Upside Potential: ${stats['upside_potential']:,.0f}")
+            if ticker in self.existing_positions:
+                investment = self.existing_positions[ticker]
+                investment_data.append({
+                    'ticker': ticker,
+                    'investment': investment,
+                    'signal': self.results[ticker]['signal']['signal']
+                })
+        
+        if investment_data:
+            inv_df = pd.DataFrame(investment_data)
+            colors_pie = [colors.get(signal, 'gray') for signal in inv_df['signal']]
             
-        print("\n" + "="*60)
+            wedges, texts, autotexts = ax3.pie(inv_df['investment'], 
+                                               labels=inv_df['ticker'],
+                                               autopct='%1.1f%%',
+                                               colors=colors_pie,
+                                               startangle=90)
+            ax3.set_title('Investment Allocation')
         
-        # Cleanup plot files
+        # 4. Expected returns bar chart
+        ax4 = axes[1, 1]
+        expected_returns = []
         for ticker in self.results:
-            plot_file = self.results[ticker]['plot']
-            if os.path.exists(plot_file):
-                os.remove(plot_file)
-                
-        return output_file
+            expected_returns.append({
+                'ticker': ticker,
+                'expected_return': self.results[ticker]['projection']['expected_return'],
+                'signal': self.results[ticker]['signal']['signal']
+            })
         
-    def interpret_momentum_indicators(self, momentum):
-        """Interpret momentum indicators and provide trading signals"""
-        rsi = momentum['rsi']
-        macd = momentum['macd']
-        bb_pos = momentum['bb_position']
-        ma_mom = momentum['ma_momentum']
-        ma50 = momentum['price_vs_ma50']
-        ma200 = momentum['price_vs_ma200']
+        exp_df = pd.DataFrame(expected_returns)
+        bars = ax4.bar(exp_df['ticker'], exp_df['expected_return'], 
+                      color=[colors.get(signal, 'gray') for signal in exp_df['signal']])
+        ax4.set_title('Expected Returns by Stock')
+        ax4.set_ylabel('Expected P&L ($)')
+        ax4.tick_params(axis='x', rotation=45)
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_filename = 'portfolio_correlation_analysis.png'
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        return plot_filename
 
-        def interpret_rsi(val):
-            if val >= 80:
-                return f"RSI is {val:.1f} → Very Overbought: High reversal risk."
-            elif val >= 70:
-                return f"RSI is {val:.1f} → Overbought: Caution, possible pullback."
-            elif val >= 55:
-                return f"RSI is {val:.1f} → Mildly Bullish: Moderate strength."
-            elif val >= 45:
-                return f"RSI is {val:.1f} → Neutral: No strong trend."
-            elif val >= 30:
-                return f"RSI is {val:.1f} → Oversold: Possible rebound."
-            else:
-                return f"RSI is {val:.1f} → Very Oversold: High rebound potential."
-
-        def interpret_macd(val):
-            if val >= 2:
-                return f"MACD {val:.2f} → Strong Bullish: Confirmed uptrend."
-            elif val >= 1:
-                return f"MACD {val:.2f} → Bullish: Positive momentum."
-            elif val >= 0.2:
-                return f"MACD {val:.2f} → Mild Bullish: Weak but improving."
-            elif val >= -0.2:
-                return f"MACD {val:.2f} → Flat: No trend."
-            elif val >= -1:
-                return f"MACD {val:.2f} → Mild Bearish: Weak downward move."
-            else:
-                return f"MACD {val:.2f} → Strong Bearish: Momentum loss or trend reversal."
-
-        def interpret_bb(val):
-            if val >= 0.9:
-                return f"BB Pos {val:.2f} → Extremely Overbought: Above upper band."
-            elif val >= 0.75:
-                return f"BB Pos {val:.2f} → Upper Band Zone: Price rising fast."
-            elif val >= 0.5:
-                return f"BB Pos {val:.2f} → Above Midline: Uptrend."
-            elif val >= 0.25:
-                return f"BB Pos {val:.2f} → Below Midline: Slight weakness."
-            elif val >= 0.1:
-                return f"BB Pos {val:.2f} → Lower Band Zone: Potential oversold."
-            else:
-                return f"BB Pos {val:.2f} → Extremely Oversold: Below lower band."
-
-        def interpret_ma_momentum(val):
-            if val >= 0.1:
-                return f"MA Momentum {val*100:.2f}% → Strong Bullish: Long-term uptrend."
-            elif val >= 0.03:
-                return f"MA Momentum {val*100:.2f}% → Bullish Crossover: Positive trend."
-            elif val >= 0:
-                return f"MA Momentum {val*100:.2f}% → Flat/Neutral."
-            elif val >= -0.03:
-                return f"MA Momentum {val*100:.2f}% → Weak Bearish."
-            else:
-                return f"MA Momentum {val*100:.2f}% → Strong Bearish: Long-term downtrend."
-
-        def interpret_price_vs_ma(val, label):
-            pct = val * 100
-            if pct >= 10:
-                return f"{pct:.2f}% above {label} → Very Bullish"
-            elif pct >= 3:
-                return f"{pct:.2f}% above {label} → Bullish"
-            elif pct >= 0:
-                return f"{pct:.2f}% above {label} → Slightly Bullish"
-            elif pct >= -3:
-                return f"{pct:.2f}% below {label} → Slightly Bearish"
-            elif pct >= -10:
-                return f"{pct:.2f}% below {label} → Bearish"
-            else:
-                return f"{pct:.2f}% below {label} → Very Bearish"
-
-        return {
-            'RSI': interpret_rsi(rsi),
-            'MACD': interpret_macd(macd),
-            'Bollinger Band Position': interpret_bb(bb_pos),
-            'MA Momentum': interpret_ma_momentum(ma_mom),
-            'Price vs MA50': interpret_price_vs_ma(ma50, 'MA50'),
-            'Price vs MA200': interpret_price_vs_ma(ma200, 'MA200')
-        }
-
-# Usage Example
-if __name__ == "__main__":
-    # Define stocks to analyze
-    tickers = ['TSM', 'PLTR', 'GOOG', 'BNS', 'VFV.TO', 'BTCC.TO', 'SPMO', 'CORT']
+    def analyze_option_strategies(self, ticker):
+        """Analyze detailed option strategies for a given stock with live market data"""
+        if ticker not in self.options_data or self.options_data[ticker] is None:
+            return None
+            
+        options = self.options_data[ticker]
+        current_price = options['current_price']
+        calls = options['calls']
+        puts = options['puts']
+        days_to_expiry = options['days_to_expiry']
+        
+        print(f"    Analyzing {len(calls)} calls and {len(puts)} puts for {ticker}")
+        
+        # Create enhanced options visualizations with volatility surface and smile
+        try:
+            self.create_enhanced_options_visualization(ticker, options)
+        except Exception as e:
+            print(f"    {ticker}: Error in enhanced options visualization: {str(e)}")
+            
+        try:
+            self.create_volatility_surface(ticker, options)
+        except Exception as e:
+            print(f"    {ticker}: Error in volatility surface: {str(e)}")
+            
+        try:
+            self.create_volatility_smile(ticker, options)
+        except Exception as e:
+            print(f"    {ticker}: Error in volatility smile: {str(e)}")
+            
+        try:
+            self.create_options_chain_visualization(ticker, options)
+        except Exception as e:
+            print(f"    {ticker}: Error in options chain visualization: {str(e)}")
+        
+        strategies = {}
+        
+        # Market sentiment analysis
+        put_call_ratio = options.get('put_call_ratio', 0)
+        total_volume = options.get('total_call_volume', 0) + options.get('total_put_volume', 0)
+        
+        print(f"    {ticker} Market Sentiment: Put/Call Ratio = {put_call_ratio:.2f}, Total Volume = {total_volume}")
+        
+        # 1. Covered Call Strategy
+        if not calls.empty:
+            # Find best ATM call option with volume
+            atm_calls = calls[(calls['volume'] > 0) | (calls['openInterest'] > 0)]
+            if not atm_calls.empty:
+                # Find ATM call
+                atm_call = atm_calls.iloc[(atm_calls['strike'] - current_price).abs().argsort()[:1]]
+                if not atm_call.empty:
+                    call_strike = atm_call.iloc[0]['strike']
+                    call_premium = atm_call.iloc[0]['lastPrice']
+                    call_volume = atm_call.iloc[0]['volume']
+                    call_oi = atm_call.iloc[0]['openInterest']
+                    
+                    # Calculate covered call P&L
+                    max_profit = call_premium
+                    max_loss = current_price - call_strike + call_premium
+                    breakeven = current_price - call_premium
+                    upside_cap = call_strike
+                    
+                    # Calculate returns
+                    annualized_return = (call_premium / current_price) * (365 / days_to_expiry) * 100
+                    
+                    # Calculate Greeks for the call option
+                    call_iv = self.calculate_implied_volatility(call_premium, current_price, call_strike, days_to_expiry/365, 0.05, 'call')
+                    call_greeks = self.calculate_greeks(current_price, call_strike, days_to_expiry/365, 0.05, call_iv, 'call')
+                    
+                    strategies['covered_call'] = {
+                        'strategy': 'Covered Call',
+                        'strike': call_strike,
+                        'premium': call_premium,
+                        'volume': call_volume,
+                        'open_interest': call_oi,
+                        'max_profit': max_profit,
+                        'max_loss': max_loss,
+                        'breakeven': breakeven,
+                        'upside_cap': upside_cap,
+                        'annualized_return': annualized_return,
+                        'risk_reward_ratio': abs(max_profit / max_loss) if max_loss != 0 else float('inf'),
+                        'probability_profit': self.calculate_profit_probability(current_price, call_strike, 'covered_call'),
+                        'recommendation': 'EXCELLENT' if annualized_return > 20 else 'GOOD' if annualized_return > 10 else 'POOR',
+                        'liquidity': 'HIGH' if call_volume > 100 else 'MEDIUM' if call_volume > 10 else 'LOW',
+                        'implied_volatility': call_iv,
+                        'delta': call_greeks['delta'],
+                        'gamma': call_greeks['gamma'],
+                        'theta': call_greeks['theta'],
+                        'vega': call_greeks['vega']
+                    }
+        
+        # 2. Long Call Strategy
+        if not calls.empty:
+            # Find best OTM call option with volume for speculation
+            otm_calls = calls[(calls['strike'] > current_price) & ((calls['volume'] > 0) | (calls['openInterest'] > 0))]
+            if not otm_calls.empty:
+                # Find call with reasonable premium and good liquidity
+                otm_calls['premium_ratio'] = otm_calls['lastPrice'] / otm_calls['strike']
+                # Choose call with moderate premium (not too expensive, not too cheap)
+                reasonable_calls = otm_calls[(otm_calls['premium_ratio'] > 0.02) & (otm_calls['premium_ratio'] < 0.15)]
+                if not reasonable_calls.empty:
+                    best_call = reasonable_calls.iloc[0]
+                else:
+                    best_call = otm_calls.iloc[0]
+                
+                call_strike = best_call['strike']
+                call_premium = best_call['lastPrice']
+                call_volume = best_call['volume']
+                call_oi = best_call['openInterest']
+                
+                # Calculate long call P&L
+                max_profit = float('inf')  # Unlimited upside
+                max_loss = call_premium
+                breakeven = call_strike + call_premium
+                
+                # Calculate potential return if stock moves up 10%
+                potential_move = current_price * 0.10
+                potential_profit = max(0, current_price + potential_move - call_strike) - call_premium
+                potential_return = (potential_profit / call_premium) * 100 if call_premium > 0 else 0
+                
+                # Calculate Greeks for the call option
+                call_iv = self.calculate_implied_volatility(call_premium, current_price, call_strike, days_to_expiry/365, 0.05, 'call')
+                call_greeks = self.calculate_greeks(current_price, call_strike, days_to_expiry/365, 0.05, call_iv, 'call')
+                
+                strategies['long_call'] = {
+                    'strategy': 'Long Call',
+                    'strike': call_strike,
+                    'premium': call_premium,
+                    'volume': call_volume,
+                    'open_interest': call_oi,
+                    'max_profit': max_profit,
+                    'max_loss': max_loss,
+                    'breakeven': breakeven,
+                    'potential_return_10pct_move': potential_return,
+                    'risk_reward_ratio': float('inf'),
+                    'probability_profit': self.calculate_profit_probability(current_price, breakeven, 'long_call'),
+                    'recommendation': 'EXCELLENT' if potential_return > 50 else 'GOOD' if potential_return > 25 else 'POOR',
+                    'liquidity': 'HIGH' if call_volume > 100 else 'MEDIUM' if call_volume > 10 else 'LOW',
+                    'implied_volatility': call_iv,
+                    'delta': call_greeks['delta'],
+                    'gamma': call_greeks['gamma'],
+                    'theta': call_greeks['theta'],
+                    'vega': call_greeks['vega']
+                }
+        
+        # 3. Long Put Strategy (for hedging/speculation)
+        if not puts.empty:
+            # Find best OTM put option with volume
+            otm_puts = puts[(puts['strike'] < current_price) & ((puts['volume'] > 0) | (puts['openInterest'] > 0))]
+            if not otm_puts.empty:
+                # Find put with reasonable premium and good liquidity
+                otm_puts['premium_ratio'] = otm_puts['lastPrice'] / otm_puts['strike']
+                # Choose put with moderate premium
+                reasonable_puts = otm_puts[(otm_puts['premium_ratio'] > 0.02) & (otm_puts['premium_ratio'] < 0.15)]
+                if not reasonable_puts.empty:
+                    best_put = reasonable_puts.iloc[0]
+                else:
+                    best_put = otm_puts.iloc[0]
+                
+                put_strike = best_put['strike']
+                put_premium = best_put['lastPrice']
+                put_volume = best_put['volume']
+                put_oi = best_put['openInterest']
+                
+                # Calculate long put P&L
+                max_profit = put_strike - put_premium  # Maximum profit if stock goes to zero
+                max_loss = put_premium
+                breakeven = put_strike - put_premium
+                
+                # Calculate potential return if stock moves down 10%
+                potential_move = current_price * 0.10
+                potential_profit = max(0, put_strike - (current_price - potential_move)) - put_premium
+                potential_return = (potential_profit / put_premium) * 100 if put_premium > 0 else 0
+                
+                # Calculate Greeks for the put option
+                put_iv = self.calculate_implied_volatility(put_premium, current_price, put_strike, days_to_expiry/365, 0.05, 'put')
+                put_greeks = self.calculate_greeks(current_price, put_strike, days_to_expiry/365, 0.05, put_iv, 'put')
+                
+                strategies['long_put'] = {
+                    'strategy': 'Long Put',
+                    'strike': put_strike,
+                    'premium': put_premium,
+                    'volume': put_volume,
+                    'open_interest': put_oi,
+                    'max_profit': max_profit,
+                    'max_loss': max_loss,
+                    'breakeven': breakeven,
+                    'potential_return_10pct_move': potential_return,
+                    'risk_reward_ratio': abs(max_profit / max_loss) if max_loss != 0 else float('inf'),
+                    'probability_profit': self.calculate_profit_probability(current_price, breakeven, 'long_put'),
+                    'recommendation': 'EXCELLENT' if potential_return > 50 else 'GOOD' if potential_return > 25 else 'POOR',
+                    'liquidity': 'HIGH' if put_volume > 100 else 'MEDIUM' if put_volume > 10 else 'LOW',
+                    'implied_volatility': put_iv,
+                    'delta': put_greeks['delta'],
+                    'gamma': put_greeks['gamma'],
+                    'theta': put_greeks['theta'],
+                    'vega': put_greeks['vega']
+                }
+        
+        print(f"    {ticker}: Analyzed {len(strategies)} option strategies")
+        return strategies
     
-    # Create analyzer
-    analyzer = AdvancedStockProjection(
-        tickers=tickers,
-        investment_per_stock=10000,
-        projection_years=2
+    def calculate_profit_probability(self, current_price, target_price, strategy_type):
+        """Calculate probability of profit for option strategies"""
+        # Use historical volatility to estimate probability
+        volatility = 0.25  # Assume 25% annual volatility
+        days_to_expiry = 60  # Assume 60 days
+        
+        if strategy_type == 'covered_call':
+            # For covered call: profit if stock stays below strike
+            z_score = (target_price - current_price) / (current_price * volatility * np.sqrt(days_to_expiry/365))
+            probability = 1 - stats.norm.cdf(z_score)
+            return max(0, min(100, float(probability) * 100))
+        
+        elif strategy_type in ['long_call', 'long_put']:
+            # For long options: profit if stock moves beyond breakeven
+            z_score = (target_price - current_price) / (current_price * volatility * np.sqrt(days_to_expiry/365))
+            if strategy_type == 'long_call':
+                probability = 1 - stats.norm.cdf(z_score)
+            else:  # long_put
+                probability = stats.norm.cdf(z_score)
+            return max(0, min(100, float(probability) * 100))
+        
+        return 50  # Default 50% probability
+
+    def create_options_visualization(self, ticker, options):
+        """Create enhanced options visualization with volatility surface and smile"""
+        # Use the new enhanced visualization method
+        return self.create_enhanced_options_visualization(ticker, options)
+    
+    def create_options_chain_visualization(self, ticker, options):
+        """Create comprehensive options chain visualization showing all strikes and moneyness"""
+        current_price = options['current_price']
+        calls = options['calls']
+        puts = options['puts']
+        expiration = options['expiration']
+        
+        if calls.empty and puts.empty:
+            return None
+            
+        # Create figure
+        fig, axes = plt.subplots(2, 1, figsize=(16, 12))
+        fig.suptitle(f'{ticker} Options Chain - {expiration}', fontsize=16, fontweight='bold')
+        
+        # 1. Call Options Chain
+        ax1 = axes[0]
+        if not calls.empty:
+            strikes = calls['strike'].values
+            premiums = calls['lastPrice'].values
+            volumes = calls['volume'].values
+            open_interest = calls['openInterest'].values
+            
+            # Calculate moneyness
+            moneyness = (strikes - current_price) / current_price * 100
+            
+            # Color based on ITM/OTM status
+            colors = ['green' if strike < current_price else 'red' for strike in strikes]
+            
+            # Create scatter plot with size based on volume
+            sizes = np.maximum(volumes / max(volumes) * 200, 20) if max(volumes) > 0 else 50
+            
+            scatter = ax1.scatter(strikes, premiums, s=sizes, c=colors, alpha=0.7, edgecolors='black')
+            
+            # Add intrinsic value line
+            intrinsic_values = np.maximum(0, current_price - strikes)
+            ax1.plot(strikes, intrinsic_values, 'b--', alpha=0.5, label='Intrinsic Value')
+            
+            # Add current price line
+            ax1.axvline(x=current_price, color='red', linestyle='--', alpha=0.7, label='Current Price')
+            
+            # Add labels for ITM/OTM zones
+            ax1.text(current_price * 0.9, ax1.get_ylim()[1] * 0.9, 'ITM\nCalls', 
+                    ha='center', va='top', fontweight='bold', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgreen", alpha=0.7))
+            ax1.text(current_price * 1.1, ax1.get_ylim()[1] * 0.9, 'OTM\nCalls', 
+                    ha='center', va='top', fontweight='bold', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
+            
+            ax1.set_xlabel('Strike Price ($)')
+            ax1.set_ylabel('Option Premium ($)')
+            ax1.set_title('Call Options Chain')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # Add volume annotations for significant options
+            for i, (strike, premium, volume) in enumerate(zip(strikes, premiums, volumes)):
+                if volume > max(volumes) * 0.1:  # Show volume for top 10%
+                    ax1.annotate(f'Vol: {volume}', (strike, premium), 
+                                xytext=(5, 5), textcoords='offset points', fontsize=8)
+        
+        # 2. Put Options Chain
+        ax2 = axes[1]
+        if not puts.empty:
+            strikes = puts['strike'].values
+            premiums = puts['lastPrice'].values
+            volumes = puts['volume'].values
+            open_interest = puts['openInterest'].values
+            
+            # Calculate moneyness
+            moneyness = (strikes - current_price) / current_price * 100
+            
+            # Color based on ITM/OTM status (opposite of calls)
+            colors = ['red' if strike < current_price else 'green' for strike in strikes]
+            
+            # Create scatter plot with size based on volume
+            sizes = np.maximum(volumes / max(volumes) * 200, 20) if max(volumes) > 0 else 50
+            
+            scatter = ax2.scatter(strikes, premiums, s=sizes, c=colors, alpha=0.7, edgecolors='black')
+            
+            # Add intrinsic value line
+            intrinsic_values = np.maximum(0, strikes - current_price)
+            ax2.plot(strikes, intrinsic_values, 'b--', alpha=0.5, label='Intrinsic Value')
+            
+            # Add current price line
+            ax2.axvline(x=current_price, color='red', linestyle='--', alpha=0.7, label='Current Price')
+            
+            # Add labels for ITM/OTM zones
+            ax2.text(current_price * 1.1, ax2.get_ylim()[1] * 0.9, 'ITM\nPuts', 
+                    ha='center', va='top', fontweight='bold', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightgreen", alpha=0.7))
+            ax2.text(current_price * 0.9, ax2.get_ylim()[1] * 0.9, 'OTM\nPuts', 
+                    ha='center', va='top', fontweight='bold', bbox=dict(boxstyle="round,pad=0.3", facecolor="lightcoral", alpha=0.7))
+            
+            ax2.set_xlabel('Strike Price ($)')
+            ax2.set_ylabel('Option Premium ($)')
+            ax2.set_title('Put Options Chain')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+            
+            # Add volume annotations for significant options
+            for i, (strike, premium, volume) in enumerate(zip(strikes, premiums, volumes)):
+                if volume > max(volumes) * 0.1:  # Show volume for top 10%
+                    ax2.annotate(f'Vol: {volume}', (strike, premium), 
+                                xytext=(5, 5), textcoords='offset points', fontsize=8)
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_filename = f'{ticker}_options_chain.png'
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"    {ticker}: Created options chain visualization: {plot_filename}")
+        return plot_filename
+    
+    def get_position_recommendation(self, signal, score):
+        """Generate recommendation for existing positions"""
+        if signal in ['STRONG BUY', 'BUY']:
+            if score >= 70:
+                return "HOLD STRONG"
+            else:
+                return "HOLD"
+        elif signal == 'HOLD':
+            if score >= 60:
+                return "HOLD"
+            else:
+                return "CONSIDER REDUCING"
+        else:  # SELL signals
+            if score <= 30:
+                return "STRONG SELL"
+            else:
+                return "CONSIDER SELLING"
+    
+    def calculate_position_size(self, ticker, result):
+        """Calculate suggested position size for new investments"""
+        if ticker in self.existing_positions:
+            return 0  # No new investment for existing positions
+        
+        # Base suggestion on signal strength and risk
+        base_amount = 5000  
+        signal = result['signal']['signal']
+        score = result['signal']['combined_score']
+        risk_level = result['signal']['risk_level']
+        
+        # Adjust based on signal strength
+        if signal == 'STRONG BUY' and score >= 75:
+            multiplier = 1.5
+        elif signal in ['STRONG BUY', 'BUY'] and score >= 60:
+            multiplier = 1.0
+        elif signal == 'HOLD':
+            multiplier = 0.5
+        else:
+            multiplier = 0.25
+        
+        # Adjust based on risk
+        if risk_level == 'HIGH':
+            multiplier *= 0.7
+        elif risk_level == 'MEDIUM':
+            multiplier *= 0.85
+        
+        return int(base_amount * multiplier)
+
+    def create_volatility_surface(self, ticker, options):
+        """Create realistic 3D volatility surface visualization with market skew and interpolation"""
+        import numpy as np
+        import pandas as pd
+        from scipy.interpolate import griddata
+        current_price = options['current_price']
+        all_expirations = options['all_expirations']
+        
+        if not all_expirations:
+            return None
+            
+        # Collect data from all expirations
+        surface_data = []
+        
+        for exp, exp_data in all_expirations.items():
+            days_to_expiry = exp_data['days_to_expiry']
+            calls = exp_data['calls']
+            puts = exp_data['puts']
+            
+            # Combine calls and puts for volatility calculation
+            all_options = []
+            if not calls.empty:
+                for _, call in calls.iterrows():
+                    all_options.append({
+                        'strike': call['strike'],
+                        'premium': call['lastPrice'],
+                        'type': 'call',
+                        'days_to_expiry': days_to_expiry
+                    })
+            
+            if not puts.empty:
+                for _, put in puts.iterrows():
+                    all_options.append({
+                        'strike': put['strike'],
+                        'premium': put['lastPrice'],
+                        'type': 'put',
+                        'days_to_expiry': days_to_expiry
+                    })
+            
+            # Calculate implied volatility for each option
+            for opt in all_options:
+                try:
+                    # Use Black-Scholes to back out implied volatility
+                    iv = self.calculate_implied_volatility(
+                        opt['premium'], current_price, opt['strike'], 
+                        opt['days_to_expiry']/365, 0.05, opt['type']
+                    )
+                    if iv > 0 and iv < 2:  # Reasonable IV range
+                        surface_data.append({
+                            'strike': opt['strike'],
+                            'days_to_expiry': days_to_expiry,
+                            'implied_vol': iv,
+                            'moneyness': (opt['strike'] - current_price) / current_price
+                        })
+                except:
+                    continue
+        
+        if len(surface_data) < 10:
+            # If not enough real data, create realistic synthetic surface
+            return self.create_synthetic_volatility_surface(ticker, current_price)
+            
+        # Create DataFrame
+        surface_df = pd.DataFrame(surface_data)
+        
+        # Analyze market sentiment from the data
+        market_sentiment = self.analyze_market_sentiment_from_data(surface_df, current_price)
+        
+        # Interpolation grid
+        strikes = surface_df['strike'].values
+        days = surface_df['days_to_expiry'].values
+        ivs = surface_df['implied_vol'].values
+        
+        strike_grid = np.linspace(strikes.min(), strikes.max(), 50)
+        days_grid = np.linspace(days.min(), days.max(), 50)
+        X, Y = np.meshgrid(strike_grid, days_grid)
+        
+        # Interpolate implied volatility
+        Z = griddata(
+            points=(strikes, days),
+            values=ivs,
+            xi=(X, Y),
+            method='cubic'
+        )
+        
+        # Create 3D surface plot
+        import matplotlib.pyplot as plt
+        fig = plt.figure(figsize=(16, 12))
+        ax = fig.add_subplot(111, projection='3d')  # type: ignore
+        
+        # Plot the interpolated surface
+        surf = ax.plot_surface(X, Y, Z, cmap='viridis', alpha=0.85, edgecolor='none')
+        
+        # Overlay the actual data points as scatter
+        scatter = ax.scatter(strikes, days, ivs, c=ivs, cmap='viridis', s=50, alpha=0.8, edgecolors='black')
+        
+        # Add colorbar
+        fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5, label='Implied Volatility')
+        
+        # Add current price reference
+        ax.axvline(x=current_price, color='black', linestyle='--', alpha=0.7, label='Current Price')
+        
+        # Customize plot
+        ax.set_xlabel('Strike Price ($)')
+        ax.set_ylabel('Days to Expiry')
+        try:
+            ax.set_zlabel('Implied Volatility')
+        except AttributeError:
+            pass
+        ax.set_title(f'{ticker} Volatility Surface (Interpolated) - {market_sentiment.upper()} Market')
+        
+        # Rotate for better view
+        try:
+            ax.view_init(elev=20, azim=45)
+        except AttributeError:
+            pass
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_filename = f'{ticker}_volatility_surface.png'
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"    {ticker}: Created interpolated volatility surface: {plot_filename}")
+        return plot_filename
+    
+    def create_synthetic_volatility_surface(self, ticker, current_price):
+        """Create synthetic volatility surface when real data is insufficient"""
+        
+        # Define expiration dates (in days)
+        days_to_expiry = np.array([30, 60, 90, 120, 180])
+        
+        # Define strike prices (as percentage of current price)
+        strike_ratios = np.array([0.8, 0.85, 0.9, 0.95, 1.0, 1.05, 1.1, 1.15, 1.2])
+        strikes = current_price * strike_ratios
+        
+        # Base volatility parameters (realistic for most stocks)
+        base_iv = 0.30  # 30% base volatility
+        
+        # Create realistic surface data with skew
+        surface_data = []
+        
+        for days in days_to_expiry:
+            for strike in strikes:
+                # Calculate moneyness
+                moneyness = (strike - current_price) / current_price
+                
+                # Base volatility
+                iv = base_iv
+                
+                # Term structure effect (volatility increases with time)
+                term_effect = 0.02 * (days / 365)
+                iv += term_effect
+                
+                # Volatility smile effect (higher IV for OTM and ITM options)
+                smile_effect = 0.08 * moneyness**2
+                iv += smile_effect
+                
+                # Volatility skew effect (higher IV for OTM puts - typical market behavior)
+                skew_effect = 0.15 * np.maximum(0, -moneyness)  # Higher IV for OTM puts
+                iv += skew_effect
+                
+                # Add some realistic noise
+                noise = np.random.normal(0, 0.02)
+                iv += noise
+                
+                # Bounds checking
+                iv = max(0.15, min(0.6, iv))
+                
+                surface_data.append({
+                    'strike': strike,
+                    'days_to_expiry': days,
+                    'implied_vol': iv,
+                    'moneyness': moneyness
+                })
+        
+        surface_df = pd.DataFrame(surface_data)
+        
+        # Create 3D surface plot
+        fig = plt.figure(figsize=(16, 12))
+        ax = fig.add_subplot(111, projection='3d')  # type: ignore
+        
+        # Prepare data for surface plot
+        strikes = surface_df['strike'].values
+        days = surface_df['days_to_expiry'].values
+        ivs = surface_df['implied_vol'].values
+        
+        # Create simple scatter plot of actual data points
+        # No interpolation - just show the real data
+        scatter = ax.scatter(strikes.astype(float), days.astype(float), ivs.astype(float), 
+                           c=ivs.astype(float), cmap='viridis', s=50, alpha=0.8)
+        
+        # Add colorbar
+        fig.colorbar(scatter, ax=ax, shrink=0.5, aspect=5, label='Implied Volatility')
+        
+        # Add current price reference
+        ax.axvline(x=current_price, color='black', linestyle='--', alpha=0.7, label='Current Price')
+        
+        # Customize plot
+        ax.set_xlabel('Strike Price ($)')
+        ax.set_ylabel('Days to Expiry')
+        try:
+            ax.set_zlabel('Implied Volatility')
+        except AttributeError:
+            pass
+        ax.set_title(f'{ticker} Synthetic Volatility Surface (Typical Market Skew)')
+        
+        # Add colorbar
+        fig.colorbar(surf, ax=ax, shrink=0.5, aspect=5, label='Implied Volatility')
+        
+        # Add current price reference
+        ax.axvline(x=current_price, color='black', linestyle='--', alpha=0.7, label='Current Price')
+        
+        # Rotate for better view
+        try:
+            ax.view_init(elev=20, azim=45)
+        except AttributeError:
+            pass
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_filename = f'{ticker}_volatility_surface.png'
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"    {ticker}: Created synthetic volatility surface: {plot_filename}")
+        return plot_filename
+    
+    def analyze_market_sentiment_from_data(self, surface_df, current_price):
+        """Analyze market sentiment from volatility surface data"""
+        
+        # Calculate skew
+        atm_data = surface_df[np.abs(surface_df['moneyness']) < 0.02]  # ATM options
+        otm_puts = surface_df[(surface_df['moneyness'] < -0.05) & (surface_df['days_to_expiry'] == 60)]
+        otm_calls = surface_df[(surface_df['moneyness'] > 0.05) & (surface_df['days_to_expiry'] == 60)]
+        
+        if not otm_puts.empty and not otm_calls.empty and not atm_data.empty:
+            put_skew = otm_puts['implied_vol'].mean() - atm_data['implied_vol'].mean()
+            call_skew = otm_calls['implied_vol'].mean() - atm_data['implied_vol'].mean()
+            
+            if put_skew > 0.1:
+                return 'fear'
+            elif call_skew > 0.1:
+                return 'greed'
+            else:
+                return 'normal'
+        
+        return 'normal'
+    
+    def calculate_implied_volatility(self, option_price, spot_price, strike_price, time_to_expiry, risk_free_rate, option_type):
+        """Calculate implied volatility using Newton-Raphson method"""
+        def black_scholes(S, K, T, r, sigma, option_type):
+            d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+            d2 = d1 - sigma*np.sqrt(T)
+            
+            if option_type == 'call':
+                price = S*stats.norm.cdf(d1) - K*np.exp(-r*T)*stats.norm.cdf(d2)
+            else:  # put
+                price = K*np.exp(-r*T)*stats.norm.cdf(-d2) - S*stats.norm.cdf(-d1)
+            return price
+        
+        def black_scholes_vega(S, K, T, r, sigma):
+            d1 = (np.log(S/K) + (r + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+            return S*np.sqrt(T)*stats.norm.pdf(d1)
+        
+        # Initial guess
+        sigma = 0.3
+        
+        # Newton-Raphson iteration
+        for i in range(100):
+            price = black_scholes(spot_price, strike_price, time_to_expiry, risk_free_rate, sigma, option_type)
+            vega = black_scholes_vega(spot_price, strike_price, time_to_expiry, risk_free_rate, sigma)
+            
+            diff = option_price - price
+            
+            if abs(diff) < 1e-5:
+                break
+                
+            sigma = sigma + diff/vega
+            
+            # Bounds check
+            if sigma <= 0:
+                sigma = 0.01
+            elif sigma > 5:
+                sigma = 5
+        
+        return sigma
+    
+    def calculate_greeks(self, spot_price, strike_price, time_to_expiry, risk_free_rate, implied_vol, option_type):
+        """Calculate option Greeks using Black-Scholes model"""
+        # Calculate d1 and d2
+        d1 = (np.log(spot_price/strike_price) + (risk_free_rate + 0.5*implied_vol**2)*time_to_expiry) / (implied_vol*np.sqrt(time_to_expiry))
+        d2 = d1 - implied_vol*np.sqrt(time_to_expiry)
+        
+        # Calculate Greeks
+        if option_type == 'call':
+            delta = stats.norm.cdf(d1)
+            gamma = stats.norm.pdf(d1) / (spot_price * implied_vol * np.sqrt(time_to_expiry))
+            theta = (-spot_price * stats.norm.pdf(d1) * implied_vol / (2 * np.sqrt(time_to_expiry)) - 
+                    risk_free_rate * strike_price * np.exp(-risk_free_rate * time_to_expiry) * stats.norm.cdf(d2))
+            vega = spot_price * np.sqrt(time_to_expiry) * stats.norm.pdf(d1)
+        else:  # put
+            delta = stats.norm.cdf(d1) - 1
+            gamma = stats.norm.pdf(d1) / (spot_price * implied_vol * np.sqrt(time_to_expiry))
+            theta = (-spot_price * stats.norm.pdf(d1) * implied_vol / (2 * np.sqrt(time_to_expiry)) + 
+                    risk_free_rate * strike_price * np.exp(-risk_free_rate * time_to_expiry) * stats.norm.cdf(-d2))
+            vega = spot_price * np.sqrt(time_to_expiry) * stats.norm.pdf(d1)
+        
+        # Convert theta to daily (divide by 365)
+        theta_daily = theta / 365
+        
+        return {
+            'delta': delta,
+            'gamma': gamma,
+            'theta': theta_daily,
+            'vega': vega
+        }
+    
+    def create_volatility_smile(self, ticker, options):
+        """Create volatility smile visualization"""
+        current_price = options['current_price']
+        calls = options['calls']
+        puts = options['puts']
+        days_to_expiry = options['days_to_expiry']
+        
+        if calls.empty and puts.empty:
+            return None
+            
+        # Calculate implied volatility for all options
+        smile_data = []
+        
+        # Process calls
+        if not calls.empty:
+            for _, call in calls.iterrows():
+                try:
+                    iv = self.calculate_implied_volatility(
+                        call['lastPrice'], current_price, call['strike'], 
+                        days_to_expiry/365, 0.05, 'call'
+                    )
+                    if iv > 0 and iv < 2:
+                        smile_data.append({
+                            'strike': call['strike'],
+                            'implied_vol': iv,
+                            'moneyness': (call['strike'] - current_price) / current_price,
+                            'type': 'call',
+                            'volume': call['volume']
+                        })
+                except:
+                    continue
+        
+        # Process puts
+        if not puts.empty:
+            for _, put in puts.iterrows():
+                try:
+                    iv = self.calculate_implied_volatility(
+                        put['lastPrice'], current_price, put['strike'], 
+                        days_to_expiry/365, 0.05, 'put'
+                    )
+                    if iv > 0 and iv < 2:
+                        smile_data.append({
+                            'strike': put['strike'],
+                            'implied_vol': iv,
+                            'moneyness': (put['strike'] - current_price) / current_price,
+                            'type': 'put',
+                            'volume': put['volume']
+                        })
+                except:
+                    continue
+        
+        if len(smile_data) < 5:
+            print(f"    {ticker}: Insufficient data for volatility smile (need at least 5 options, got {len(smile_data)})")
+            return None
+            
+        # Create DataFrame
+        smile_df = pd.DataFrame(smile_data)
+        
+        # Create figure with subplots
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle(f'{ticker} Volatility Smile Analysis', fontsize=16, fontweight='bold')
+        
+        # 1. Volatility Smile by Strike
+        ax1 = axes[0, 0]
+        
+        # Separate calls and puts
+        calls_data = smile_df[smile_df['type'] == 'call']
+        puts_data = smile_df[smile_df['type'] == 'put']
+        
+        # Only add legend entries if we have data
+        legend_handles = []
+        legend_labels = []
+        
+        if not calls_data.empty:
+            scatter1 = ax1.scatter(calls_data['strike'], calls_data['implied_vol'], 
+                       c='blue', s=calls_data['volume']*2, alpha=0.7)
+            legend_handles.append(scatter1)
+            legend_labels.append('Calls')
+            
+        if not puts_data.empty:
+            scatter2 = ax1.scatter(puts_data['strike'], puts_data['implied_vol'], 
+                       c='red', s=puts_data['volume']*2, alpha=0.7)
+            legend_handles.append(scatter2)
+            legend_labels.append('Puts')
+        
+        # Add current price line
+        price_line = ax1.axvline(x=current_price, color='black', linestyle='--', alpha=0.7)
+        legend_handles.append(price_line)
+        legend_labels.append('Current Price')
+        
+        # Show raw data points without curve fitting
+        # This gives a clearer view of the actual market data
+        
+        ax1.set_xlabel('Strike Price ($)')
+        ax1.set_ylabel('Implied Volatility')
+        ax1.set_title('Volatility Smile by Strike')
+        
+        # Only create legend if we have handles
+        if legend_handles:
+            ax1.legend(legend_handles, legend_labels)
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Volatility Smile by Moneyness
+        ax2 = axes[0, 1]
+        
+        legend_handles2 = []
+        legend_labels2 = []
+        
+        if not calls_data.empty:
+            scatter1 = ax2.scatter(calls_data['moneyness']*100, calls_data['implied_vol'], 
+                       c='blue', s=calls_data['volume']*2, alpha=0.7)
+            legend_handles2.append(scatter1)
+            legend_labels2.append('Calls')
+            
+        if not puts_data.empty:
+            scatter2 = ax2.scatter(puts_data['moneyness']*100, puts_data['implied_vol'], 
+                       c='red', s=puts_data['volume']*2, alpha=0.7)
+            legend_handles2.append(scatter2)
+            legend_labels2.append('Puts')
+        
+        # Add ATM line
+        atm_line = ax2.axvline(x=0, color='black', linestyle='--', alpha=0.7)
+        legend_handles2.append(atm_line)
+        legend_labels2.append('ATM')
+        
+        # Show raw data points without curve fitting
+        # This gives a clearer view of the actual market data
+        
+        ax2.set_xlabel('Moneyness (%)')
+        ax2.set_ylabel('Implied Volatility')
+        ax2.set_title('Volatility Smile by Moneyness')
+        
+        # Only create legend if we have handles
+        if legend_handles2:
+            ax2.legend(legend_handles2, legend_labels2)
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. IV vs Volume
+        ax3 = axes[1, 0]
+        
+        if not smile_df.empty and len(smile_df) > 0:
+            try:
+                scatter3 = ax3.scatter(smile_df['implied_vol'], smile_df['volume'], 
+                       c=smile_df['moneyness'], cmap='RdYlBu', alpha=0.7, s=50)
+                
+                # Add colorbar only if we have data
+                plt.colorbar(scatter3, ax=ax3, label='Moneyness')
+            except Exception as e:
+                ax3.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax3.transAxes)
+        else:
+            ax3.text(0.5, 0.5, 'No data available', ha='center', va='center', transform=ax3.transAxes)
+        
+        ax3.set_xlabel('Implied Volatility')
+        ax3.set_ylabel('Volume')
+        ax3.set_title('IV vs Volume (colored by moneyness)')
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. IV Distribution
+        ax4 = axes[1, 1]
+        
+        if not smile_df.empty:
+            ax4.hist(smile_df['implied_vol'], bins=min(15, len(smile_df)//2), alpha=0.7, color='skyblue', edgecolor='black')
+            
+            # Only add mean/median lines if we have data
+            if len(smile_df) > 0:
+                mean_line = ax4.axvline(smile_df['implied_vol'].mean(), color='red', linestyle='--', 
+                       label=f'Mean: {smile_df["implied_vol"].mean():.3f}')
+                median_line = ax4.axvline(smile_df['implied_vol'].median(), color='green', linestyle='--', 
+                         label=f'Median: {smile_df["implied_vol"].median():.3f}')
+                ax4.legend()
+        
+        ax4.set_xlabel('Implied Volatility')
+        ax4.set_ylabel('Frequency')
+        ax4.set_title('IV Distribution')
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_filename = f'{ticker}_volatility_smile.png'
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"    {ticker}: Created volatility smile: {plot_filename}")
+        return plot_filename
+    
+
+    
+    def create_enhanced_options_visualization(self, ticker, options):
+        """Create enhanced options visualization with volatility surface and smile"""
+        current_price = options['current_price']
+        calls = options['calls']
+        puts = options['puts']
+        expiration = options['expiration']
+        days_to_expiry = options['days_to_expiry']
+        
+        if calls.empty and puts.empty:
+            return None
+            
+        # Create volatility surface and smile with error handling
+        try:
+            surface_plot = self.create_volatility_surface(ticker, options)
+        except Exception as e:
+            print(f"    {ticker}: Error creating volatility surface: {str(e)}")
+            surface_plot = None
+            
+        try:
+            smile_plot = self.create_volatility_smile(ticker, options)
+        except Exception as e:
+            print(f"    {ticker}: Error creating volatility smile: {str(e)}")
+            smile_plot = None
+        
+        # Create comprehensive options analysis figure
+        fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+        fig.suptitle(f'{ticker} Advanced Options Analysis - {expiration} ({days_to_expiry} days)', 
+                    fontsize=16, fontweight='bold')
+        
+        # 1. Call Options Chain with IV
+        ax1 = axes[0, 0]
+        if not calls.empty:
+            try:
+                strikes = calls['strike'].values
+                premiums = calls['lastPrice'].values
+                volumes = calls['volume'].values
+                
+                # Calculate implied volatility
+                ivs = []
+                for _, call in calls.iterrows():
+                    try:
+                        iv = self.calculate_implied_volatility(
+                            call['lastPrice'], current_price, call['strike'], 
+                            days_to_expiry/365, 0.05, 'call'
+                        )
+                        ivs.append(iv if iv > 0 and iv < 2 else np.nan)
+                    except:
+                        ivs.append(np.nan)
+                
+                # Color by IV
+                scatter = ax1.scatter(strikes, premiums, s=volumes*2, c=ivs, cmap='viridis', alpha=0.7)
+                ax1.axvline(x=current_price, color='red', linestyle='--', alpha=0.7, label='Current Price')
+                ax1.set_xlabel('Strike Price ($)')
+                ax1.set_ylabel('Option Premium ($)')
+                ax1.set_title('Call Options Chain (colored by IV)')
+                plt.colorbar(scatter, ax=ax1, label='Implied Volatility')
+                ax1.grid(True, alpha=0.3)
+            except Exception as e:
+                ax1.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax1.transAxes)
+                ax1.set_title('Call Options Chain - Error')
+        
+        # 2. Put Options Chain with IV
+        ax2 = axes[0, 1]
+        if not puts.empty:
+            try:
+                strikes = puts['strike'].values
+                premiums = puts['lastPrice'].values
+                volumes = puts['volume'].values
+                
+                # Calculate implied volatility
+                ivs = []
+                for _, put in puts.iterrows():
+                    try:
+                        iv = self.calculate_implied_volatility(
+                            put['lastPrice'], current_price, put['strike'], 
+                            days_to_expiry/365, 0.05, 'put'
+                        )
+                        ivs.append(iv if iv > 0 and iv < 2 else np.nan)
+                    except:
+                        ivs.append(np.nan)
+                
+                # Color by IV
+                scatter = ax2.scatter(strikes, premiums, s=volumes*2, c=ivs, cmap='viridis', alpha=0.7)
+                ax2.axvline(x=current_price, color='red', linestyle='--', alpha=0.7, label='Current Price')
+                ax2.set_xlabel('Strike Price ($)')
+                ax2.set_ylabel('Option Premium ($)')
+                ax2.set_title('Put Options Chain (colored by IV)')
+                plt.colorbar(scatter, ax=ax2, label='Implied Volatility')
+                ax2.grid(True, alpha=0.3)
+            except Exception as e:
+                ax2.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax2.transAxes)
+                ax2.set_title('Put Options Chain - Error')
+        
+        # 3. Put-Call Parity Check
+        ax3 = axes[0, 2]
+        if not calls.empty and not puts.empty:
+            try:
+                # Find matching strikes
+                call_strikes = set(calls['strike'])
+                put_strikes = set(puts['strike'])
+                common_strikes = call_strikes.intersection(put_strikes)
+                
+                if len(common_strikes) > 0:
+                    parity_data = []
+                    for strike in common_strikes:
+                        call_price = calls[calls['strike'] == strike]['lastPrice'].iloc[0]
+                        put_price = puts[puts['strike'] == strike]['lastPrice'].iloc[0]
+                        
+                        # Put-call parity: C - P = S - K*exp(-rT)
+                        theoretical_diff = current_price - strike * np.exp(-0.05 * days_to_expiry/365)
+                        actual_diff = call_price - put_price
+                        parity_error = abs(actual_diff - theoretical_diff)
+                        
+                        parity_data.append({
+                            'strike': strike,
+                            'call_price': call_price,
+                            'put_price': put_price,
+                            'theoretical_diff': theoretical_diff,
+                            'actual_diff': actual_diff,
+                            'parity_error': parity_error
+                        })
+                    
+                    if parity_data:
+                        parity_df = pd.DataFrame(parity_data)
+                        ax3.scatter(parity_df['strike'], parity_df['parity_error'], alpha=0.7)
+                        ax3.set_xlabel('Strike Price ($)')
+                        ax3.set_ylabel('Parity Error ($)')
+                        ax3.set_title('Put-Call Parity Check')
+                        ax3.grid(True, alpha=0.3)
+            except Exception as e:
+                ax3.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax3.transAxes)
+                ax3.set_title('Parity Check - Error')
+        
+        # 4. IV vs Moneyness
+        ax4 = axes[1, 0]
+        if not calls.empty and not puts.empty:
+            try:
+                # Combine data
+                all_options = []
+                for _, call in calls.iterrows():
+                    try:
+                        iv = self.calculate_implied_volatility(
+                            call['lastPrice'], current_price, call['strike'], 
+                            days_to_expiry/365, 0.05, 'call'
+                        )
+                        if iv > 0 and iv < 2:
+                            all_options.append({
+                                'moneyness': (call['strike'] - current_price) / current_price,
+                                'iv': iv,
+                                'type': 'call'
+                            })
+                    except:
+                        continue
+                
+                for _, put in puts.iterrows():
+                    try:
+                        iv = self.calculate_implied_volatility(
+                            put['lastPrice'], current_price, put['strike'], 
+                            days_to_expiry/365, 0.05, 'put'
+                        )
+                        if iv > 0 and iv < 2:
+                            all_options.append({
+                                'moneyness': (put['strike'] - current_price) / current_price,
+                                'iv': iv,
+                                'type': 'put'
+                            })
+                    except:
+                        continue
+                
+                if all_options:
+                    options_df = pd.DataFrame(all_options)
+                    calls_data = options_df[options_df['type'] == 'call']
+                    puts_data = options_df[options_df['type'] == 'put']
+                    
+                    legend_handles = []
+                    legend_labels = []
+                    
+                    if not calls_data.empty:
+                        scatter1 = ax4.scatter(calls_data['moneyness']*100, calls_data['iv'], 
+                                   c='blue', alpha=0.7)
+                        legend_handles.append(scatter1)
+                        legend_labels.append('Calls')
+                        
+                    if not puts_data.empty:
+                        scatter2 = ax4.scatter(puts_data['moneyness']*100, puts_data['iv'], 
+                                   c='red', alpha=0.7)
+                        legend_handles.append(scatter2)
+                        legend_labels.append('Puts')
+                    
+                    atm_line = ax4.axvline(x=0, color='black', linestyle='--', alpha=0.7)
+                    legend_handles.append(atm_line)
+                    legend_labels.append('ATM')
+                    
+                    ax4.set_xlabel('Moneyness (%)')
+                    ax4.set_ylabel('Implied Volatility')
+                    ax4.set_title('IV vs Moneyness')
+                    
+                    if legend_handles:
+                        ax4.legend(legend_handles, legend_labels)
+                    ax4.grid(True, alpha=0.3)
+            except Exception as e:
+                ax4.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax4.transAxes)
+                ax4.set_title('IV vs Moneyness - Error')
+        
+        # 5. Volume Profile
+        ax5 = axes[1, 1]
+        if not calls.empty and not puts.empty:
+            try:
+                # Combine volume data
+                call_volumes = calls['volume'].sum()
+                put_volumes = puts['volume'].sum()
+                total_volume = call_volumes + put_volumes
+                
+                if total_volume > 0:
+                    labels = ['Calls', 'Puts']
+                    sizes = [call_volumes, put_volumes]
+                    colors = ['lightblue', 'lightcoral']
+                    
+                    wedges, texts, autotexts = ax5.pie(sizes, labels=labels, colors=colors, autopct='%1.1f%%')
+                    ax5.set_title('Volume Distribution')
+            except Exception as e:
+                ax5.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax5.transAxes)
+                ax5.set_title('Volume Profile - Error')
+        
+        # 6. Greeks Analysis (simplified)
+        ax6 = axes[1, 2]
+        if not calls.empty:
+            try:
+                # Calculate approximate delta for calls
+                deltas = []
+                strikes = []
+                for _, call in calls.iterrows():
+                    try:
+                        # Simplified delta calculation
+                        moneyness = (call['strike'] - current_price) / current_price
+                        if moneyness < 0:  # ITM
+                            delta = 0.8 + 0.2 * abs(moneyness)
+                        else:  # OTM
+                            delta = 0.5 * np.exp(-moneyness)
+                        deltas.append(delta)
+                        strikes.append(call['strike'])
+                    except:
+                        continue
+                
+                if deltas:
+                    ax6.scatter(strikes, deltas, alpha=0.7, c='blue')
+                    ax6.axvline(x=current_price, color='red', linestyle='--', alpha=0.7, label='Current Price')
+                    ax6.set_xlabel('Strike Price ($)')
+                    ax6.set_ylabel('Approximate Delta')
+                    ax6.set_title('Call Delta vs Strike')
+                    ax6.grid(True, alpha=0.3)
+            except Exception as e:
+                ax6.text(0.5, 0.5, f'Error: {str(e)}', ha='center', va='center', transform=ax6.transAxes)
+                ax6.set_title('Greeks Analysis - Error')
+        
+        plt.tight_layout()
+        
+        # Save plot
+        plot_filename = f'{ticker}_enhanced_options_analysis.png'
+        plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        print(f"    {ticker}: Created enhanced options visualization: {plot_filename}")
+        return plot_filename
+
+# Example usage
+if __name__ == "__main__":
+    # Example stock list - replace with your desired tickers
+    sample_tickers = ['PLTR', 'GOOGL', 'BNS.TO', 'VFV.TO', 'TSM', 'BTCC.TO', 'AMD']
+    
+    # Enter your share counts - the system will automatically calculate current values
+    existing_positions = {
+        'PLTR': 12,      # 12 shares of PLTR
+        'GOOGL': 30,     # 30 shares of GOOGL
+        'BNS.TO': 40,       # 40 shares of BNS
+        'VFV.TO': 42,    # 42 shares of VFV.TO 
+        'BTCC.TO': 50,   # 50 shares of BTCC.TO
+        'TSM': 8,        # 8 shares of TSM
+        'AMD': 3.6       # 3.6 shares of AMD
+    }
+    
+    # Add speculative/planning stocks (stocks you're considering but don't own yet)
+    planning_stocks = ['SPMO'] 
+    
+    # Initialize analyzer
+    analyzer = StrategyStockAnalyzer(
+        tickers=sample_tickers + planning_stocks,  # Analyze both real and planning stocks
+        existing_positions=existing_positions,      # Your real holdings
+        planning_stocks=planning_stocks,           # Your speculative ideas
+        new_investment_ideas=True,  # Enable new investment ideas
+        projection_months=2,  # 2-month projection
+        historical_years=5    # 5 years of historical data
     )
     
-    # Run analysis
-    analyzer.run_analysis()
+    # Run complete analysis
+    results = analyzer.run_complete_analysis()
     
-    print("\n Analysis Complete!")
-    print("Check the generated Excel file for detailed results and visualizations.")
+    print("\nAnalysis Complete!")
